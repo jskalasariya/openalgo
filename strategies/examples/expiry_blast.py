@@ -32,6 +32,9 @@ from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from openalgo import api
 import pandas as pd
 import sys
+import traceback
+from position_persistence import PositionPersistenceManager
+from database.position_persistence_db import init_position_persistence_db, EventType
 
 # ==================== LOGGING SETUP ====================
 
@@ -175,6 +178,8 @@ LOOKBACK_CANDLES = config_loader.get('monitoring', 'lookback_candles', 5)
 BREAKOUT_THRESHOLD_PCT = config_loader.get('monitoring', 'breakout_threshold_pct', 0.0)
 
 ENTRY_QUANTITY = config_loader.get('position', 'entry_quantity', 75)
+LOT_MULTIPLIER = config_loader.get('position', 'lot_multiplier', 1)
+FINAL_QUANTITY = int(ENTRY_QUANTITY * LOT_MULTIPLIER)
 INITIAL_STOP_PCT = config_loader.get('position', 'initial_stop_pct', 0.50)
 TRAIL_PERCENT_STEP = config_loader.get('position', 'trail_step_pct', 0.01)
 PROFIT_TARGET_PCT = config_loader.get('position', 'profit_target_pct', 1.00)
@@ -198,6 +203,11 @@ CLOSE_ON_ATM_CHANGE = config_loader.get('atm_monitoring', 'close_on_atm_change',
 MONITOR_CE = config_loader.get('legs', 'monitor_ce', True)
 MONITOR_PE = config_loader.get('legs', 'monitor_pe', True)
 
+# ==================== TEST MODE CONFIGURATION ====================
+# Set to True to simulate all strategy logic without placing actual orders
+# All positions will be tracked in DB as if they were real trades
+TEST_MODE = config_loader.get('strategy', 'test_mode', False)
+
 TZ = pytz.timezone(config_loader.get('strategy', 'timezone', 'Asia/Kolkata'))
 
 logger.info(f"\n{'='*60}")
@@ -208,6 +218,7 @@ logger.info(f"Start Time: {START_HOUR:02d}:{START_MINUTE:02d} IST | End Time: {E
 logger.info(f"Expiry Day Only: {RUN_ONLY_ON_EXPIRY_DAY}")
 logger.info(f"Auto Place Orders: {AUTO_PLACE_ORDERS}")
 logger.info(f"Monitor ATM Changes: {MONITOR_ATM_CHANGES}")
+logger.info(f"TEST MODE: {'🟢 ENABLED (Orders simulated, not placed)' if TEST_MODE else '🔴 DISABLED (Live trading)'}")
 logger.info(f"{'='*60}\n")
 
 # ==================== API CLIENT ====================
@@ -218,8 +229,8 @@ client = api(api_key=API_KEY, host=API_HOST)
 # ==================== UTILITY FUNCTIONS ====================
 
 def is_market_open() -> bool:
-    # Jaysukh
-    return True
+    # # Jaysukh
+    # return True
     """Check if current time is within market hours"""
     now = datetime.now(TZ)
     current_time = now.time()
@@ -394,6 +405,22 @@ def get_ltp(symbol: str) -> Optional[float]:
         return None
 
 
+# ==================== PERSISTENCE INITIALIZATION ====================
+
+try:
+    init_position_persistence_db()
+    persistence = PositionPersistenceManager(
+        strategy_name='expiry_blast',
+        api_client=client,
+        batch_interval=10,
+        enable_async=False,
+        logger_instance=logger
+    )
+    logger.info("✓ Position persistence initialized")
+except Exception as e:
+    logger.error(f"✗ Error initializing persistence: {e}")
+    persistence = None
+
 # ==================== LEG MONITOR CLASS ====================
 
 @dataclass
@@ -409,6 +436,7 @@ class PositionState:
     last_trail_level: int
     last_atm_check: int  # Candle count since last ATM check
     current_strike: float
+    position_id: Optional[str] = None  # Persistence tracking
 
 
 class LegMonitor:
@@ -428,7 +456,8 @@ class LegMonitor:
             position_open=False,
             last_trail_level=0,
             last_atm_check=0,
-            current_strike=strike
+            current_strike=strike,
+            position_id=None
         )
         self.candle_count = 0
         self.highest_high = 0
@@ -513,6 +542,19 @@ class LegMonitor:
                 self.state.highest_price = ltp
                 self.state.last_trail_level = 0
                 
+                # PERSISTENCE: Save entry
+                if persistence:
+                    try:
+                        self.state.position_id = persistence.save_position_entry(
+                            symbol=self.symbol,
+                            leg_type=self.leg_type,
+                            strike=self.strike,
+                            entry_price=ltp,
+                            highest_high_breakout=self.highest_high
+                        )
+                    except Exception as e:
+                        logger.error(f"✗ Error saving position entry to persistence: {e}")
+                
                 entry_msg = (
                     f"\n{'='*60}\n"
                     f"✅ ENTRY SIGNAL: {self.leg_type}\n"
@@ -526,12 +568,26 @@ class LegMonitor:
                 logger.info(entry_msg)
                 
                 if AUTO_PLACE_ORDERS:
-                    self._place_order(ENTRY_ACTION, ENTRY_QUANTITY)
+                    self._place_order(ENTRY_ACTION, FINAL_QUANTITY)
             
             # ========== POSITION MANAGEMENT ==========
             if self.state.position_open:
                 profit_pct = (ltp / self.state.entry_price) - 1
                 gain_points = ltp - self.state.entry_price
+                
+                # PERSISTENCE: Queue update
+                if persistence and self.state.position_id:
+                    try:
+                        persistence.queue_position_update(
+                            position_id=self.state.position_id,
+                            current_price=ltp,
+                            stop_price=self.state.stop_price,
+                            highest_price=self.state.highest_price,
+                            last_trail_level=self.state.last_trail_level,
+                            profit_percent=profit_pct
+                        )
+                    except Exception as e:
+                        logger.error(f"✗ Error queuing position update to persistence: {e}")
                 
                 # Check for 100% profit exit
                 if profit_pct >= PROFIT_TARGET_PCT:
@@ -547,23 +603,37 @@ class LegMonitor:
                     )
                     logger.info(exit_msg)
                     
+                    # PERSISTENCE: Save exit
+                    if persistence and self.state.position_id:
+                        try:
+                            persistence.save_position_exit(
+                                position_id=self.state.position_id,
+                                exit_price=ltp,
+                                exit_reason='PROFIT_TARGET',
+                                profit_loss=gain_points * ENTRY_QUANTITY
+                            )
+                        except Exception as e:
+                            logger.error(f"✗ Error saving position exit to persistence: {e}")
+                    
                     if AUTO_PLACE_ORDERS:
-                        self._place_order(EXIT_ACTION, ENTRY_QUANTITY)
+                        self._place_order(EXIT_ACTION, FINAL_QUANTITY)
                     
                     self.state.position_open = False
                     break
                 
-                # Trailing stop logic
-                steps = int(profit_pct / TRAIL_PERCENT_STEP) if profit_pct > 0 else 0
-                
-                if steps > self.state.last_trail_level:
-                    old_stop = self.state.stop_price
-                    new_stop = self.state.entry_price * (1 + (steps - 1) * TRAIL_PERCENT_STEP)
-                    self.state.stop_price = new_stop
-                    self.state.last_trail_level = steps
+                # Trailing stop logic - Move stop up by exactly the profit amount
+                if profit_pct > 0:
+                    # Calculate new stop: current_price - (entry_price * initial_stop_pct)
+                    # This maintains a constant % buffer below price
+                    new_stop = ltp - (self.state.entry_price * INITIAL_STOP_PCT)
                     
-                    if PRINT_POSITION_UPDATES:
-                        logger.info(f"📈 {self.leg_type} Trail Update: Stop {old_stop:.2f} → {new_stop:.2f} | Profit: {profit_pct*100:.1f}%")
+                    # Only update if stop has moved up
+                    if new_stop > self.state.stop_price:
+                        old_stop = self.state.stop_price
+                        self.state.stop_price = new_stop
+                        
+                        if PRINT_POSITION_UPDATES:
+                            logger.info(f"📈 {self.leg_type} Trail Update: Stop {old_stop:.2f} → {new_stop:.2f} | Profit: {profit_pct*100:.1f}%")
                 
                 # Check for stop loss
                 if ltp <= self.state.stop_price:
@@ -580,8 +650,20 @@ class LegMonitor:
                     )
                     logger.info(exit_msg)
                     
+                    # PERSISTENCE: Save exit
+                    if persistence and self.state.position_id:
+                        try:
+                            persistence.save_position_exit(
+                                position_id=self.state.position_id,
+                                exit_price=ltp,
+                                exit_reason='STOP_LOSS',
+                                profit_loss=gain_points * ENTRY_QUANTITY
+                            )
+                        except Exception as e:
+                            logger.error(f"✗ Error saving position exit to persistence: {e}")
+                    
                     if AUTO_PLACE_ORDERS:
-                        self._place_order(EXIT_ACTION, ENTRY_QUANTITY)
+                        self._place_order(EXIT_ACTION, FINAL_QUANTITY)
                     
                     self.state.position_open = False
                     break
@@ -589,9 +671,80 @@ class LegMonitor:
             time.sleep(CHECK_SLEEP)
     
     def _place_order(self, action: str, quantity: int):
-        """Place an order (placeholder)"""
-        logger.info(f"📤 ORDER PLACEMENT ({action}): {self.symbol} x {quantity}")
-        # Integration with broker API would go here
+        """Place an order (or simulate in test mode)"""
+        try:
+            if TEST_MODE:
+                # Simulate order in TEST_MODE - persist to DB
+                logger.info(f"🧪 TEST MODE - SIMULATED ORDER ({action}): {self.symbol} x {quantity}")
+                
+                # Log simulated order to persistence
+                if persistence and self.state.position_id:
+                    try:
+                        order_data = {
+                            'symbol': self.symbol,
+                            'action': action,
+                            'quantity': quantity,
+                            'price_type': PRICE_TYPE,
+                            'product': PRODUCT,
+                            'simulated': True
+                        }
+                        persistence.log_event(
+                            event_type=EventType.ENTRY if action == ENTRY_ACTION else EventType.EXIT,
+                            summary=f"TEST MODE: Simulated {action} order for {self.symbol}",
+                            position_id=self.state.position_id,
+                            data=order_data
+                        )
+                        logger.info(f"✓ Simulated order persisted to DB")
+                    except Exception as e:
+                        logger.error(f"✗ Error persisting simulated order: {e}")
+            else:
+                # Place real order via OpenAlgo API using smart order (position-aware)
+                logger.info(f"📤 LIVE ORDER PLACEMENT ({action}): {self.symbol} x {quantity}")
+                
+                response = client.placesmartorder(
+                    strategy=f"expiry_blast_{self.leg_type}",
+                    symbol=self.symbol,
+                    exchange=OPTION_EXCHANGE,
+                    action=action,
+                    price_type=PRICE_TYPE,
+                    product=PRODUCT,
+                    quantity=quantity,
+                    position_size=quantity  # Smart order adjusts based on current position
+                )
+                
+                if response.get('status') == 'success':
+                    order_id = response.get('orderid')
+                    logger.info(f"✅ Order placed successfully! OrderID: {order_id}")
+                    
+                    # Log real order to persistence
+                    if persistence and self.state.position_id:
+                        try:
+                            order_data = {
+                                'symbol': self.symbol,
+                                'action': action,
+                                'quantity': quantity,
+                                'order_id': order_id,
+                                'price_type': PRICE_TYPE,
+                                'product': PRODUCT,
+                                'response': response
+                            }
+                            persistence.log_event(
+                                event_type=EventType.ENTRY if action == ENTRY_ACTION else EventType.EXIT,
+                                summary=f"Live order placed: {action} {quantity}x {self.symbol} → {order_id}",
+                                position_id=self.state.position_id,
+                                data=order_data
+                            )
+                        except Exception as e:
+                            logger.error(f"✗ Error logging order to persistence: {e}")
+                else:
+                    error_msg = response.get('message', 'Unknown error')
+                    logger.error(f"✗ Order placement failed: {error_msg}")
+                    logger.error(f"  Full response: {response}")
+        
+        except Exception as e:
+            logger.error(f"✗ Exception in _place_order: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 # ==================== STRATEGY EXECUTION ====================
@@ -601,15 +754,39 @@ def run_full_monitor():
     now = datetime.now(TZ)
     logger.info(f"\n{'='*70}")
     logger.info(f"▶️  Strategy Triggered at {now.strftime('%Y-%m-%d %H:%M:%S IST')}")
+    if TEST_MODE:
+        logger.info(f"🧪 TEST MODE ACTIVE - All logic simulated, no real orders placed")
     logger.info(f"{'='*70}\n")
+    
+    # Start persistence session
+    session_id = None
+    if persistence:
+        try:
+            session_id = persistence.start_session(underlying=UNDERLYING)
+            logger.info(f"✓ Persistence session started: {session_id}")
+            if TEST_MODE:
+                logger.info(f"  ℹ️  Session marked as TEST MODE")
+            
+            # Check for crashed positions from previous runs
+            crashed = persistence.get_crashed_positions(underlying=UNDERLYING)
+            if crashed:
+                logger.warning(f"⚠️  Found {len(crashed)} crashed positions from previous runs!")
+                for pos in crashed:
+                    logger.warning(f"   - {pos.symbol} @ Entry: {pos.entry_price:.2f}, Stop: {pos.stop_price:.2f}")
+        except Exception as e:
+            logger.error(f"✗ Error starting persistence session: {e}")
     
     # Check if it's expiry day and within market hours
     if not is_expiry_day():
         logger.info("⏭️  Not an expiry day. Exiting.")
+        if persistence and session_id:
+            persistence.end_session('COMPLETED')
         return
     
     if not is_market_open():
         logger.info(f"⏹️  Market hours not active ({START_HOUR:02d}:{START_MINUTE:02d}-{END_HOUR:02d}:{END_MINUTE:02d} IST). Exiting.")
+        if persistence and session_id:
+            persistence.end_session('COMPLETED')
         return
     
     try:
@@ -643,20 +820,29 @@ def run_full_monitor():
             thread.join()
         
         logger.info(f"\n✓ Strategy execution completed at {datetime.now(TZ).strftime('%H:%M:%S IST')}")
+        if persistence and session_id:
+            persistence.end_session('COMPLETED')
     
     except KeyboardInterrupt:
         logger.info("\n⏹️  Strategy interrupted by user.")
+        if persistence and session_id:
+            persistence.end_session('MANUAL_STOP')
     except Exception as e:
         logger.error(f"\n✗ Strategy error: {e}")
         import traceback
+        if persistence and session_id:
+            persistence.handle_crash(str(e), "Strategy execution error")
+            persistence.flush_all_pending()
+            persistence.end_session('CRASHED')
         traceback.print_exc()
 
 
 # ==================== SCHEDULER ====================
 
 if __name__ == "__main__":
-    # Set to True to run immediately for testing (ignores scheduled time)
-    TEST_MODE = True
+    # RUN_IMMEDIATELY_ON_STARTUP: Bypass scheduler and run strategy immediately (for testing)
+    # TEST_MODE: Simulate order placement without actually sending orders to broker
+    RUN_IMMEDIATELY_ON_STARTUP = config_loader.get('strategy', 'run_immediately_on_startup', False)
     
     scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
     
@@ -686,12 +872,20 @@ if __name__ == "__main__":
     logger.info(f"{'='*70}")
     logger.info(f"  Daily trigger: {START_HOUR:02d}:{START_MINUTE:02d} IST (Mon-Fri)")
     logger.info(f"  Configuration: {config_loader.config_path}")
-    logger.info(f"  Test Mode: {'ENABLED - Running immediately' if TEST_MODE else 'DISABLED - Waiting for scheduled time'}")
+    logger.info(f"  Run Immediately: {RUN_IMMEDIATELY_ON_STARTUP}")
+    if TEST_MODE:
+        logger.info(f"  🟢 TEST MODE ENABLED (Order Simulation):")
+        logger.info(f"     • All strategy logic will execute normally")
+        logger.info(f"     • All entries/exits will be tracked in database")
+        logger.info(f"     • NO actual orders will be placed to broker")
+        logger.info(f"     • Perfect for multi-expiry backtesting")
+    else:
+        logger.info(f"  🔴 LIVE TRADING MODE - Orders will be placed to broker!")
     logger.info(f"{'='*70}\n")
     
-    # Run immediately in test mode
-    if TEST_MODE:
-        logger.info(f"🧪 TEST MODE: Running strategy immediately...\n")
+    # Run immediately if configured (bypass scheduler)
+    if RUN_IMMEDIATELY_ON_STARTUP:
+        logger.info(f"⚡ RUN_IMMEDIATELY_ON_STARTUP enabled: Executing strategy now...\n")
         run_full_monitor()
     
     try:
