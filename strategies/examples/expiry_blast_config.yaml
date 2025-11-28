@@ -1,0 +1,134 @@
+# Expiry Blast Strategy Configuration
+# This file defines all configurable parameters for the expiry blast strategy
+
+# API Configuration
+api:
+  key: your_openalgo_api_key
+  host: http://127.0.0.1:5000
+
+# Strategy Parameters
+strategy:
+  # Underlying asset - can be NIFTY, SENSEX, BANKNIFTY, FINNIFTY, etc.
+  underlying: "NIFTY"
+  
+  # Underlying exchange - NSE_INDEX for indices, NSE for stocks
+  underlying_exchange: "NSE_INDEX"
+  
+  # Options exchange
+  option_exchange: "NFO"
+  
+  # Time zone
+  timezone: "Asia/Kolkata"
+  
+  # Only run on expiry day (True/False)
+  run_only_on_expiry_day: false
+  
+  # TEST MODE: Set to true to simulate all strategy logic WITHOUT placing actual orders
+  # Perfect for backtesting over multiple expiries before going live
+  # When true: All entries/exits tracked in DB, but NO orders sent to broker
+  test_mode: false
+  
+  # RUN IMMEDIATELY ON STARTUP: Set to true to execute strategy immediately (bypass scheduler)
+  # Useful for testing/debugging without waiting for scheduled time
+  # When true: Strategy runs now, then scheduler continues for future scheduled runs
+  run_immediately_on_startup: false
+
+# Scheduling
+schedule:
+  # Start time in IST (24-hour format)
+  start_hour: 10
+  start_minute: 0
+  
+  # End time in IST (when to stop monitoring)
+  end_hour: 15
+  end_minute: 30
+  
+  # Check interval in seconds
+  check_interval_seconds: 5
+
+# Monitoring Parameters
+monitoring:
+  # Candle interval for breakout analysis (e.g., "1m", "3m", "5m", "15m")
+  candle_interval: "3m"
+  
+  # Number of lookback candles to analyze
+  lookback_candles: 5
+  
+  # Breakout threshold (additional % above highest high, 0 means breakout at highest high)
+  breakout_threshold_pct: 0.0
+
+# Position Management
+position:
+  # Entry quantity per leg (CE and PE)
+  entry_quantity: 75
+  
+  # Lot multiplier - quantity will be multiplied by this value
+  # Final quantity = entry_quantity * lot_multiplier
+  # Example: entry_quantity=75, lot_multiplier=2 → final quantity = 150
+  lot_multiplier: 1
+  
+  # Initial stop loss as percentage of entry price (0.50 = 50%)
+  initial_stop_pct: 0.50
+  
+  # Trailing stop increment per move (0.01 = 1%)
+  trail_step_pct: 0.01
+  
+  # Profit target as percentage of entry price (1.00 = 100%)
+  profit_target_pct: 1.00
+  
+  # ATM check interval - re-check ATM every N candles to see if it has changed
+  atm_recheck_interval: 5
+
+# Order Configuration
+orders:
+  # Auto place orders (False = dry run mode, True = live trading)
+  auto_place_orders: false
+  
+  # Instrument type for API calls ("options" for options trading)
+  instrument_type: "options"
+  
+  # Price type - "MARKET" or "LIMIT"
+  price_type: "MARKET"
+  
+  # Product type - "NRML" (normal), "MIS" (margin intraday square-off), etc.
+  product: "NRML"
+  
+  # Action type for entry - "BUY" or "SELL"
+  entry_action: "BUY"
+  
+  # Action type for exit - "SELL" for BUY positions, "BUY" for SHORT positions
+  exit_action: "SELL"
+
+# Logging
+logging:
+  # Print quotes immediately after fetching
+  print_quotes_immediately: true
+  
+  # Print candle data
+  print_candle_data: true
+  
+  # Print position updates
+  print_position_updates: true
+  
+  # Log file path (optional, empty string = no file logging)
+  log_file_path: ""
+
+# ATM Change Handling
+atm_monitoring:
+  # Enable monitoring for ATM changes during the day
+  monitor_atm_changes: true
+  
+  # ATM check interval in minutes (check if ATM has changed every N minutes)
+  atm_check_interval_minutes: 5
+  
+  # Close positions if ATM changes (True = exit and re-enter with new ATM)
+  close_on_atm_change: true
+
+# Leg Specifications
+legs:
+  # Monitor both CE and PE or only one
+  monitor_ce: true
+  monitor_pe: true
+  
+  # If monitoring only one leg, specify which one
+  single_leg_type: null  # "CE" or "PE" or null for both
