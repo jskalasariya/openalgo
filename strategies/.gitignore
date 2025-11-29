@@ -9,7 +9,7 @@ strategy_env.json
 scripts/*.py
 
 # Keep example strategies
-!examples/
+!expiries/
 !examples/*.py
 
 # Ignore any backup files
