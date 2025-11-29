@@ -252,7 +252,7 @@ USAGE CHECKLIST
 Before First Run:
   □ Copy position_persistence.py to strategies/examples/
   □ Copy database/position_persistence_db.py to database/
-  □ Run: python -c "from database.position_persistence_db import init_position_persistence_db; init_position_persistence_db()"
+  □ Run: python -c "from database.expiry_blast_db import init_position_persistence_db; init_position_persistence_db()"
   □ Read PERSISTENCE_INTEGRATION_GUIDE.md
 
 Integration:

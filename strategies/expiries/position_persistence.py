@@ -39,7 +39,7 @@ from typing import List, Dict, Optional, Any, Callable
 from dataclasses import dataclass, asdict
 import time
 
-from database.position_persistence_db import (
+from database.expiry_blast_db import (
     db_session,
     init_position_persistence_db,
     StrategySession,

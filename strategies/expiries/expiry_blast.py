@@ -34,7 +34,7 @@ import pandas as pd
 import sys
 import traceback
 from position_persistence import PositionPersistenceManager
-from database.position_persistence_db import init_position_persistence_db, EventType
+from database.expiry_blast_db import init_position_persistence_db, EventType
 from utils.websocket_ltp_client import WebSocketLTPClient, create_websocket_client
 
 # ==================== LOGGING SETUP ====================

@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 DATABASE_URL = os.getenv('DATABASE_URL')
 
 if not DATABASE_URL:
-    # Default to SQLite database in project root
-    db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'broker_strategies.db')
+    # Default to SQLite database in db folder
+    db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'db', 'expiry_blast.db')
     DATABASE_URL = f'sqlite:///{db_path}'
     logger.info(f"📁 Using default SQLite database: {db_path}")
 
@@ -221,7 +221,7 @@ class PositionEvent(Base):
 def init_position_persistence_db():
     """Initialize the position persistence database"""
     try:
-        Base.metadata.create_all(bind=engine)
+        Base.metadata.create_all(bind=engine, checkfirst=True)
         logger.info("✓ Position persistence database initialized successfully")
     except Exception as e:
         logger.error(f"✗ Error initializing position persistence database: {e}")

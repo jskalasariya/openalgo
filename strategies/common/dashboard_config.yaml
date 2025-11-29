@@ -1,0 +1,93 @@
+# Strategy Dashboard Configuration
+# ================================
+# Unified configuration for all strategies in the dashboard
+
+# Global Dashboard Settings
+global:
+  page_title: "Strategy Dashboard - Multi-Strategy View"
+  page_icon: "📊"
+  refresh_interval: 30  # seconds
+  auto_refresh_default: false
+  
+  # Global color scheme (can be overridden per strategy)
+  colors:
+    positive: '#2ecc71'
+    negative: '#e74c3c'
+    neutral: '#1f77b4'
+    running: '#2ecc71'
+    crashed: '#e74c3c'
+    completed: '#95a5a6'
+
+# Strategy-Specific Configurations
+strategies:
+  
+  # Expiry Blast Strategy
+  expiry_blast:
+    display_name: "Expiry Blast Strategy"
+    page_icon: "📊"
+    description: "Multi-leg options strategy for expiry day trading"
+    
+    # Feature toggles
+    show_price_chart: true
+    show_pnl_analysis: true
+    show_event_timeline: true
+    show_statistics: true
+    
+    # Metrics to display in overview
+    metrics:
+      total_trades: true
+      win_rate: true
+      total_pnl: true
+      avg_profit: true
+      profit_factor: true
+      open_positions: true
+    
+    # Strategy-specific settings (optional)
+    # colors:
+    #   positive: '#custom_color'  # Override global if needed
+  
+  # Nifty Sehwag Strategy
+  nifty_sehwag:
+    display_name: "Nifty Sehwag Strategy"
+    page_icon: "🏏"
+    description: "Multi-leg options strategy for NIFTY expiry day trading"
+    
+    # Feature toggles
+    show_price_chart: true
+    show_pnl_analysis: true
+    show_event_timeline: true
+    show_statistics: true
+    
+    # Metrics to display in overview
+    metrics:
+      total_trades: true
+      win_rate: true
+      total_pnl: true
+      avg_profit: true
+      profit_factor: true
+      open_positions: true
+
+# Default Configuration Template
+# Use this as a template when adding new strategies
+default_strategy:
+  display_name: "Strategy Name"
+  page_icon: "📊"
+  description: "Strategy description"
+  show_price_chart: true
+  show_pnl_analysis: true
+  show_event_timeline: true
+  show_statistics: true
+  metrics:
+    total_trades: true
+    win_rate: true
+    total_pnl: true
+    avg_profit: true
+    profit_factor: true
+    open_positions: true
+
+# Notes:
+# - Add new strategies under the 'strategies' section
+# - Strategy name should match the 'strategy_name' used in PositionPersistenceManager
+# - All settings are optional and will fall back to defaults
+# - Icons can be emoji or text
+# - Colors should be hex codes (#RRGGBB)

@@ -1,0 +1,166 @@
+# Nifty Sehwag Strategy Configuration
+# This file defines all configurable parameters for the nifty sehwag strategy
+
+# API Configuration
+api:
+  key: your_openalgo_api_key
+  host: http://127.0.0.1:5000
+
+# Strategy Parameters
+strategy:
+  # Underlying asset - NIFTY, SENSEX, BANKNIFTY, FINNIFTY, etc.
+  underlying: "NIFTY"
+  
+  # Underlying exchange - NSE_INDEX for indices
+  underlying_exchange: "NSE_INDEX"
+  
+  # Options exchange
+  option_exchange: "NFO"
+  
+  # Time zone
+  timezone: "Asia/Kolkata"
+  
+  # Only run on expiry day
+  run_only_on_expiry_day: true
+  
+  # TEST MODE: Set to true to simulate all strategy logic WITHOUT placing actual orders
+  # When true: All entries/exits tracked in simulation, but NO orders sent to broker
+  test_mode: false
+  
+  # Wait & Trade threshold - price must move this % before taking position (3% = 3.0)
+  wait_trade_threshold_pct: 3.0
+  
+  # Candle interval for breakout analysis (previous day's last 3 candles)
+  candle_interval: "3m"
+  
+  # Number of lookback candles for analysis (3 for last 3 candles)
+  lookback_candles_minutes: 3
+
+# Strategy Scheduling
+schedule:
+  # Main strategy start time (09:15:10)
+  strategy_start_hour: 9
+  strategy_start_minute: 15
+  strategy_start_second: 10
+  
+  # End time for strategy (close all positions by this time)
+  end_hour: 10
+  end_minute: 00
+
+# Leg Configurations
+# Define as many legs as needed. Each leg is executed in order with its own delay.
+# Add or remove legs here - strategy will automatically adapt!
+legs:
+  # ========== LEG 1 ==========
+  # Entry at 09:15:10 (base time + 0 seconds delay)
+  # ITM3, 7% SL, 2% lock profit, increases lock by 1% for every 2% profit
+  - name: "Leg 1"
+    enabled: true
+    entry_delay_seconds: 0     # 0 seconds from strategy start = 09:15:10
+    itm_level: 3               # ITM 3 (ATM +300 for CE, ATM -300 for PE)
+    quantity: 1                # Quantity per order
+    initial_sl_pct: 7.0        # 7% stop loss
+    lock_profit_pct: 2.0       # 2% initial lock profit
+    profit_increase_step: 1.0  # Increase lock by 1% every
+    profit_step_threshold: 2.0 # For every 2% profit gain
+    management_type: "escalating_profit"  # Type: escalating_profit, dynamic_sl, or fixed
+    auto_close_profit_pct: null  # null = no auto-close
+  
+  # ========== LEG 2 ==========
+  # Entry at 09:15:45 (35 seconds after strategy start)
+  # ITM3, 7% initial SL (decreases as profit increases)
+  # Dynamic SL: 1% decrease per profit gain
+  # Auto-close at 12% profit
+  - name: "Leg 2"
+    enabled: true
+    entry_delay_seconds: 35    # 35 seconds from start = 09:15:45
+    itm_level: 3               # ITM 3
+    quantity: 1                # Quantity per order
+    initial_sl_pct: 7.0        # 7% initial stop loss
+    lock_profit_pct: 2.0       # Starting lock profit (not escalated)
+    dynamic_sl_decrease: 1.0   # SL decreases by 1% per profit % gain
+    management_type: "dynamic_sl"  # Dynamic SL management
+    auto_close_profit_pct: 12.0    # Auto-close at 12% profit
+  
+  # ========== LEG 3 ==========
+  # Entry at 09:16:00 (50 seconds after strategy start)
+  # ITM4 (deeper ITM than leg1)
+  # 7% SL, 2% lock profit, increases lock by 1% for every 2% profit (same as leg1)
+  - name: "Leg 3"
+    enabled: true
+    entry_delay_seconds: 50    # 50 seconds from start = 09:16:00
+    itm_level: 4               # ITM 4 (ATM +400 for CE, ATM -400 for PE)
+    quantity: 1                # Quantity per order
+    initial_sl_pct: 7.0        # 7% stop loss
+    lock_profit_pct: 2.0       # 2% initial lock profit
+    profit_increase_step: 1.0
+    profit_step_threshold: 2.0
+    management_type: "escalating_profit"
+    auto_close_profit_pct: null
+  
+  # ========== EXAMPLE: LEG 4 (DISABLED) ==========
+  # Uncomment and set enabled: true to add a 4th leg
+  # - name: "Leg 4"
+  #   enabled: false
+  #   entry_delay_seconds: 120  # 2 minutes after start = 09:17:10
+  #   itm_level: 2              # ITM 2
+  #   quantity: 2               # 2 lots
+  #   initial_sl_pct: 5.0       # 5% SL
+  #   lock_profit_pct: 3.0      # 3% lock profit
+  #   profit_increase_step: 1.5
+  #   profit_step_threshold: 2.0
+  #   management_type: "escalating_profit"
+  #   auto_close_profit_pct: 15.0
+
+# Position Management Types:
+# - "escalating_profit": Lock profit increases as position gains (Leg 1 & 3 style)
+# - "dynamic_sl": SL tightens as profit increases (Leg 2 style)
+# - "fixed": Simple fixed SL and target (basic management)
+
+# Order Configuration
+orders:
+  # Auto place orders (false = dry run/simulation, true = live trading)
+  auto_place_orders: false
+  
+  # Instrument type for options trading
+  instrument_type: "options"
+  
+  # Price type - "MARKET" for market orders
+  price_type: "MARKET"
+  
+  # Product type - "NRML" for normal (not intraday)
+  product: "NRML"
+  
+  # Entry action - "BUY" for buying options (CE/PE)
+  entry_action: "BUY"
+  
+  # Exit action - "SELL" to sell positions
+  exit_action: "SELL"
+
+# Logging Configuration
+logging:
+  # Print quotes immediately after fetching
+  print_quotes_immediately: true
+  
+  # Print candle data during analysis
+  print_candle_data: true
+  
+  # Print position updates
+  print_position_updates: true
+
+# WebSocket Configuration (Real-time LTP Streaming)
+websocket:
+  # Enable WebSocket for real-time LTP updates (much faster than polling)
+  # If disabled or connection fails, strategy automatically falls back to REST API polling
+  enabled: true
+  
+  # WebSocket server URL
+  # Default: ws://127.0.0.1:8765
+  # For remote servers: ws://your-server-ip:8765
+  url: "ws://127.0.0.1:8765"
+  
+  # Connection timeout in seconds
+  timeout_seconds: 10
+  
+  # Reconnection interval in seconds (if connection drops)
+  reconnect_interval_seconds: 5
