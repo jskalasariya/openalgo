@@ -31,7 +31,7 @@ strategy:
   # RUN IMMEDIATELY ON STARTUP: Set to true to execute strategy immediately (bypass scheduler)
   # Useful for testing/debugging without waiting for scheduled time
   # When true: Strategy runs now, then scheduler continues for future scheduled runs
-  run_immediately_on_startup: false
+  run_immediately_on_startup: True
 
 # Scheduling
 schedule:
@@ -132,3 +132,20 @@ legs:
   
   # If monitoring only one leg, specify which one
   single_leg_type: null  # "CE" or "PE" or null for both
+
+# WebSocket Configuration (Real-time LTP Streaming)
+websocket:
+  # Enable WebSocket for real-time LTP updates (much faster than polling)
+  # If disabled or connection fails, strategy automatically falls back to REST API polling
+  enabled: true
+  
+  # WebSocket server URL
+  # Default: ws://127.0.0.1:8765
+  # For remote servers: ws://your-server-ip:8765
+  url: "ws://127.0.0.1:8765"
+  
+  # Connection timeout in seconds
+  timeout_seconds: 10
+  
+  # Reconnection interval in seconds (if connection drops)
+  reconnect_interval_seconds: 5

@@ -22,9 +22,9 @@ import json
 import yaml
 from datetime import datetime, timedelta
 import pytz
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Callable
 from dataclasses import dataclass
-from threading import Thread
+from threading import Thread, Event, Lock
 import logging
 from logging.handlers import RotatingFileHandler
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -35,6 +35,7 @@ import sys
 import traceback
 from position_persistence import PositionPersistenceManager
 from database.position_persistence_db import init_position_persistence_db, EventType
+from utils.websocket_ltp_client import WebSocketLTPClient, create_websocket_client
 
 # ==================== LOGGING SETUP ====================
 
@@ -203,6 +204,12 @@ CLOSE_ON_ATM_CHANGE = config_loader.get('atm_monitoring', 'close_on_atm_change',
 MONITOR_CE = config_loader.get('legs', 'monitor_ce', True)
 MONITOR_PE = config_loader.get('legs', 'monitor_pe', True)
 
+# ==================== WEBSOCKET CONFIGURATION ====================
+USE_WEBSOCKET = config_loader.get('websocket', 'enabled', True)
+WEBSOCKET_URL = os.getenv('WEBSOCKET_URL', config_loader.get('websocket', 'url', 'ws://127.0.0.1:8765'))
+WEBSOCKET_TIMEOUT = config_loader.get('websocket', 'timeout_seconds', 10)
+WEBSOCKET_RECONNECT_INTERVAL = config_loader.get('websocket', 'reconnect_interval_seconds', 5)
+
 # ==================== TEST MODE CONFIGURATION ====================
 # Set to True to simulate all strategy logic without placing actual orders
 # All positions will be tracked in DB as if they were real trades
@@ -218,12 +225,43 @@ logger.info(f"Start Time: {START_HOUR:02d}:{START_MINUTE:02d} IST | End Time: {E
 logger.info(f"Expiry Day Only: {RUN_ONLY_ON_EXPIRY_DAY}")
 logger.info(f"Auto Place Orders: {AUTO_PLACE_ORDERS}")
 logger.info(f"Monitor ATM Changes: {MONITOR_ATM_CHANGES}")
+logger.info(f"WebSocket: {'📡 ENABLED' if USE_WEBSOCKET else '🔄 DISABLED (REST API polling)'} @ {WEBSOCKET_URL if USE_WEBSOCKET else 'N/A'}")
 logger.info(f"TEST MODE: {'🟢 ENABLED (Orders simulated, not placed)' if TEST_MODE else '🔴 DISABLED (Live trading)'}")
 logger.info(f"{'='*60}\n")
 
 # ==================== API CLIENT ====================
 
 client = api(api_key=API_KEY, host=API_HOST)
+
+
+# ==================== WEBSOCKET LTP CLIENT ====================
+
+# Initialize WebSocket client (if enabled)
+ws_client: Optional[WebSocketLTPClient] = None
+
+def initialize_websocket():
+    """Initialize WebSocket connection using reusable client from utils"""
+    global ws_client
+    
+    if not USE_WEBSOCKET:
+        logger.info("⏭️  WebSocket disabled in configuration")
+        return False
+    
+    try:
+        ws_client = create_websocket_client(
+            ws_url=WEBSOCKET_URL,
+            api_key=API_KEY,
+            logger_instance=logger,
+            timeout_seconds=WEBSOCKET_TIMEOUT,
+            reconnect_interval_seconds=WEBSOCKET_RECONNECT_INTERVAL
+        )
+        ws_client.start_background()
+        logger.info("✓ WebSocket client initialized (background thread)")
+        return True
+    
+    except Exception as e:
+        logger.error(f"✗ Error initializing WebSocket: {e}")
+        return False
 
 
 # ==================== UTILITY FUNCTIONS ====================
@@ -390,13 +428,22 @@ def fetch_last_candles(symbol: str) -> pd.DataFrame:
 
 
 def get_ltp(symbol: str) -> Optional[float]:
-    """Get last traded price for a symbol"""
+    """Get last traded price - try WebSocket first, fallback to REST API"""
+    # Try WebSocket first if available
+    if ws_client and ws_client.is_connected():
+        cached_price = ws_client.get_last_price(symbol)
+        if cached_price is not None:
+            if PRINT_QUOTES_IMMEDIATELY:
+                logger.info(f"💹 {symbol:15s} LTP: {cached_price:8.2f} (WebSocket)")
+            return cached_price
+    
+    # Fallback to REST API
     try:
         q = client.quotes(symbol=symbol, exchange=OPTION_EXCHANGE)
         ltp = q['data']['ltp']
         
         if PRINT_QUOTES_IMMEDIATELY:
-            logger.info(f"💹 {symbol:15s} LTP: {ltp:8.2f}")
+            logger.info(f"💹 {symbol:15s} LTP: {ltp:8.2f} (REST)")
         
         return ltp
     
@@ -501,9 +548,26 @@ class LegMonitor:
         return False
     
     def monitor(self):
-        """Main monitoring loop for this leg"""
+        """Main monitoring loop for this leg - supports WebSocket or polling"""
         logger.info(f"▶️  Starting {self.leg_type} monitoring...")
         self.initialize()
+        
+        # Register WebSocket callback if available
+        if ws_client and ws_client.is_connected():
+            logger.info(f"📡 {self.leg_type} using WebSocket for real-time LTP updates")
+            
+            price_event = Event()
+            last_price_holder = {'price': None}
+            
+            def on_price_update(ltp: float):
+                """Callback when price updates via WebSocket"""
+                last_price_holder['price'] = ltp
+                price_event.set()
+            
+            ws_client.on_price_update(self.symbol, on_price_update)
+        else:
+            logger.info(f"🔄 {self.leg_type} using polling (REST API) for LTP updates")
+            price_event = None
         
         iteration = 0
         while True:
@@ -526,10 +590,22 @@ class LegMonitor:
                 continue
             
             # Get current LTP
-            ltp = get_ltp(self.symbol)
-            if ltp is None:
+            if ws_client and ws_client.is_connected() and price_event:
+                # WebSocket mode: wait for price update or timeout
+                price_event.clear()
+                if price_event.wait(timeout=CHECK_SLEEP):
+                    ltp = last_price_holder['price']
+                else:
+                    # Timeout - continue to next iteration
+                    continue
+            else:
+                # Polling mode: fetch via REST API
+                ltp = get_ltp(self.symbol)
+                if ltp is None:
+                    time.sleep(CHECK_SLEEP)
+                    continue
+                
                 time.sleep(CHECK_SLEEP)
-                continue
             
             iteration += 1
             
@@ -751,12 +827,20 @@ class LegMonitor:
 
 def run_full_monitor():
     """Main strategy execution function"""
+    global ws_client
+    
     now = datetime.now(TZ)
     logger.info(f"\n{'='*70}")
     logger.info(f"▶️  Strategy Triggered at {now.strftime('%Y-%m-%d %H:%M:%S IST')}")
     if TEST_MODE:
         logger.info(f"🧪 TEST MODE ACTIVE - All logic simulated, no real orders placed")
     logger.info(f"{'='*70}\n")
+    
+    # Initialize WebSocket if enabled
+    if USE_WEBSOCKET and not ws_client:
+        logger.info("📡 Initializing WebSocket connection for real-time LTP...")
+        initialize_websocket()
+        time.sleep(2)  # Give WebSocket time to connect
     
     # Start persistence session
     session_id = None
@@ -797,6 +881,24 @@ def run_full_monitor():
         pe_symbol, _, pe_strike = resolve_option_symbol("PE")
         
         logger.info(f"\n✓ Symbols resolved. Starting monitoring...")
+        
+        # Subscribe to WebSocket if available
+        if ws_client and ws_client.is_connected():
+            logger.info(f"📡 Subscribing to WebSocket LTP for {ce_symbol} and {pe_symbol}...")
+            
+            try:
+                # Subscribe to both symbols
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                async def subscribe_all():
+                    await ws_client.subscribe_ltp(ce_symbol, OPTION_EXCHANGE)
+                    await ws_client.subscribe_ltp(pe_symbol, OPTION_EXCHANGE)
+                
+                loop.run_until_complete(subscribe_all())
+            except Exception as e:
+                logger.warning(f"⚠️  WebSocket subscription error: {e}")
         
         # Create monitors
         ce_monitor = LegMonitor(ce_symbol, "CE", ce_strike)
