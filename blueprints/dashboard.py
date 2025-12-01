@@ -60,3 +60,54 @@ def dashboard():
         logger.debug(f"All margin data values are zero for user {login_username}")
     
     return render_template('dashboard.html', margin_data=margin_data)
+
+
+@dashboard_bp.route('/api/funds')
+@check_session_validity
+def get_funds_api():
+    """JSON endpoint for fetching funds data via AJAX"""
+    from flask import jsonify
+    
+    login_username = session['user']
+    AUTH_TOKEN = get_auth_token(login_username)
+
+    if AUTH_TOKEN is None:
+        logger.warning(f"No auth token found for user {login_username}")
+        return jsonify({'status': 'error', 'message': 'Authentication required'}), 401
+
+    broker = session.get('broker')
+    if not broker:
+        logger.error("Broker not set in session")
+        return jsonify({'status': 'error', 'message': 'Broker not set'}), 400
+
+    # Check if in analyze mode and route accordingly
+    if get_analyze_mode():
+        # Get API key for sandbox mode
+        api_key = get_api_key_for_tradingview(login_username)
+        if api_key:
+            success, response, status_code = get_funds(api_key=api_key)
+        else:
+            logger.error("No API key found for analyze mode")
+            return jsonify({'status': 'error', 'message': 'API key required'}), 400
+    else:
+        # Use live broker
+        success, response, status_code = get_funds(auth_token=AUTH_TOKEN, broker=broker)
+    
+    if not success:
+        logger.error(f"Failed to get funds data: {response.get('message', 'Unknown error')}")
+        return jsonify({
+            'status': 'error',
+            'message': response.get('message', 'Failed to fetch funds data')
+        }), status_code
+    
+    margin_data = response.get('data', {})
+    
+    # Check if margin_data is empty (authentication failed)
+    if not margin_data:
+        logger.error(f"Failed to get margin data for user {login_username}")
+        return jsonify({'status': 'error', 'message': 'Failed to fetch margin data'}), 401
+    
+    return jsonify({
+        'status': 'success',
+        'data': margin_data
+    })

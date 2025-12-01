@@ -595,8 +595,6 @@ def render_strategy_dashboard(strategy_name: str):
     if config.get('show_pnl_analysis', True):
         with tabs[tab_index]:
             render_pnl_analysis(session)
-            if config.get('show_statistics', True):
-                render_statistics(session, config)
         tab_index += 1
     
     if config.get('show_event_timeline', True):
@@ -643,9 +641,6 @@ def main():
     col1, col2, col3 = st.columns([2, 1, 2])
     with col2:
         st.markdown("**Multi-Strategy Dashboard** | Real-time Monitoring")
-
-if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Nifty Sehwag Strategy Database Module
 =====================================
 Handles persistent storage of trade history, positions, and strategy execution logs
@@ -36,7 +36,7 @@ if not DATABASE_URL:
     # Default to SQLite database in db folder
     db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'db', 'nifty_sehwag.db')
     DATABASE_URL = f'sqlite:///{db_path}'
-    logger.info(f"📁 Using default SQLite database: {db_path}")
+    logger.info(f"ðŸ“ Using default SQLite database: {db_path}")
 
 # Conditionally create engine based on DB type
 if 'sqlite' in DATABASE_URL:
@@ -297,9 +297,9 @@ def init_db():
     """Initialize the database"""
     try:
         Base.metadata.create_all(bind=engine, checkfirst=True)
-        logger.info(f"✅ Nifty Sehwag database initialized successfully")
+        logger.info(f"âœ… Nifty Sehwag database initialized successfully")
     except Exception as e:
-        logger.error(f"❌ Failed to initialize Nifty Sehwag database: {e}")
+        logger.error(f"âŒ Failed to initialize Nifty Sehwag database: {e}")
         raise
 
 
@@ -317,10 +317,10 @@ def create_session(session_id: str, expiry_date: str, notes: str = None) -> Opti
         )
         db_session.add(session)
         db_session.commit()
-        logger.info(f"✅ Created session: {session_id}")
+        logger.info(f"âœ… Created session: {session_id}")
         return session
     except Exception as e:
-        logger.error(f"❌ Error creating session: {e}")
+        logger.error(f"âŒ Error creating session: {e}")
         db_session.rollback()
         return None
 
@@ -330,7 +330,7 @@ def get_session(session_id: str) -> Optional[NiftySehwagSession]:
     try:
         return db_session.query(NiftySehwagSession).filter_by(session_id=session_id).first()
     except Exception as e:
-        logger.error(f"❌ Error fetching session: {e}")
+        logger.error(f"âŒ Error fetching session: {e}")
         return None
 
 
@@ -345,11 +345,11 @@ def update_session_status(session_id: str, status: str, notes: str = None) -> bo
             if status == 'COMPLETED':
                 session.end_time = datetime.now()
             db_session.commit()
-            logger.info(f"✅ Updated session {session_id} status to {status}")
+            logger.info(f"âœ… Updated session {session_id} status to {status}")
             return True
         return False
     except Exception as e:
-        logger.error(f"❌ Error updating session: {e}")
+        logger.error(f"âŒ Error updating session: {e}")
         db_session.rollback()
         return False
 
@@ -362,7 +362,7 @@ def create_position(session_id: str, leg_number: int, symbol: str, atm_strike: i
     try:
         session = get_session(session_id)
         if not session:
-            logger.error(f"❌ Session not found: {session_id}")
+            logger.error(f"âŒ Session not found: {session_id}")
             return None
         
         position = NiftySehwagPosition(
@@ -377,10 +377,10 @@ def create_position(session_id: str, leg_number: int, symbol: str, atm_strike: i
         )
         db_session.add(position)
         db_session.commit()
-        logger.info(f"✅ Created position: Leg {leg_number} - {symbol}")
+        logger.info(f"âœ… Created position: Leg {leg_number} - {symbol}")
         return position
     except Exception as e:
-        logger.error(f"❌ Error creating position: {e}")
+        logger.error(f"âŒ Error creating position: {e}")
         db_session.rollback()
         return None
 
@@ -401,11 +401,11 @@ def update_position_entry(position_id: int, entry_time: datetime, entry_price: f
             position.lock_profit = lock_profit
             position.current_price = entry_price
             db_session.commit()
-            logger.info(f"✅ Updated position {position_id} with entry details")
+            logger.info(f"âœ… Updated position {position_id} with entry details")
             return True
         return False
     except Exception as e:
-        logger.error(f"❌ Error updating position entry: {e}")
+        logger.error(f"âŒ Error updating position entry: {e}")
         db_session.rollback()
         return False
 
@@ -432,7 +432,7 @@ def update_position_sl_and_profit(position_id: int, current_sl: float, lock_prof
             return True
         return False
     except Exception as e:
-        logger.error(f"❌ Error updating position SL/Profit: {e}")
+        logger.error(f"âŒ Error updating position SL/Profit: {e}")
         db_session.rollback()
         return False
 
@@ -454,11 +454,11 @@ def update_position_exit(position_id: int, exit_time: datetime, exit_price: floa
             position.pnl_percentage = pnl_percentage
             position.unrealized_pnl = 0.0
             db_session.commit()
-            logger.info(f"✅ Updated position {position_id} with exit details (PnL: {realized_pnl:.2f})")
+            logger.info(f"âœ… Updated position {position_id} with exit details (PnL: {realized_pnl:.2f})")
             return True
         return False
     except Exception as e:
-        logger.error(f"❌ Error updating position exit: {e}")
+        logger.error(f"âŒ Error updating position exit: {e}")
         db_session.rollback()
         return False
 
@@ -476,7 +476,7 @@ def update_position_price(position_id: int, current_price: float, unrealized_pnl
             return True
         return False
     except Exception as e:
-        logger.error(f"❌ Error updating position price: {e}")
+        logger.error(f"âŒ Error updating position price: {e}")
         db_session.rollback()
         return False
 
@@ -500,7 +500,7 @@ def create_position_snapshot(position_id: int, event_type: str, current_price: f
         db_session.commit()
         return snapshot
     except Exception as e:
-        logger.error(f"❌ Error creating position snapshot: {e}")
+        logger.error(f"âŒ Error creating position snapshot: {e}")
         db_session.rollback()
         return None
 
@@ -513,7 +513,7 @@ def create_order(session_id: str, order_type: str, symbol: str, side: str, quant
     try:
         session = get_session(session_id)
         if not session:
-            logger.error(f"❌ Session not found: {session_id}")
+            logger.error(f"âŒ Session not found: {session_id}")
             return None
         
         order = NiftySehwagOrder(
@@ -530,10 +530,10 @@ def create_order(session_id: str, order_type: str, symbol: str, side: str, quant
         )
         db_session.add(order)
         db_session.commit()
-        logger.info(f"✅ Created order: {symbol} {side} {quantity} @ {price}")
+        logger.info(f"âœ… Created order: {symbol} {side} {quantity} @ {price}")
         return order
     except Exception as e:
-        logger.error(f"❌ Error creating order: {e}")
+        logger.error(f"âŒ Error creating order: {e}")
         db_session.rollback()
         return None
 
@@ -550,11 +550,11 @@ def update_order_execution(order_id: int, broker_order_id: str, status: str,
             order.executed_quantity = executed_quantity
             order.execution_time = datetime.now()
             db_session.commit()
-            logger.info(f"✅ Updated order {order_id}: {status} @ {execution_price}")
+            logger.info(f"âœ… Updated order {order_id}: {status} @ {execution_price}")
             return True
         return False
     except Exception as e:
-        logger.error(f"❌ Error updating order: {e}")
+        logger.error(f"âŒ Error updating order: {e}")
         db_session.rollback()
         return False
 
@@ -567,11 +567,11 @@ def update_order_error(order_id: int, error_message: str) -> bool:
             order.status = 'REJECTED'
             order.error_message = error_message
             db_session.commit()
-            logger.error(f"❌ Order {order_id} rejected: {error_message}")
+            logger.error(f"âŒ Order {order_id} rejected: {error_message}")
             return True
         return False
     except Exception as e:
-        logger.error(f"❌ Error updating order error: {e}")
+        logger.error(f"âŒ Error updating order error: {e}")
         db_session.rollback()
         return False
 
@@ -584,7 +584,7 @@ def create_event(session_id: str, event_type: str, description: str = None,
     try:
         session = get_session(session_id)
         if not session:
-            logger.error(f"❌ Session not found: {session_id}")
+            logger.error(f"âŒ Session not found: {session_id}")
             return None
         
         event = NiftySehwagEvent(
@@ -599,7 +599,7 @@ def create_event(session_id: str, event_type: str, description: str = None,
         db_session.commit()
         return event
     except Exception as e:
-        logger.error(f"❌ Error creating event: {e}")
+        logger.error(f"âŒ Error creating event: {e}")
         db_session.rollback()
         return None
 
@@ -642,7 +642,7 @@ def get_session_summary(session_id: str) -> Optional[Dict]:
         }
         return summary
     except Exception as e:
-        logger.error(f"❌ Error generating session summary: {e}")
+        logger.error(f"âŒ Error generating session summary: {e}")
         return None
 
 
@@ -673,12 +673,56 @@ def get_daily_performance(expiry_date: str) -> Optional[Dict]:
             'sessions': [s.session_id for s in sessions]
         }
     except Exception as e:
-        logger.error(f"❌ Error generating daily performance: {e}")
+        logger.error(f"âŒ Error generating daily performance: {e}")
         return None
 
+
+
+
+# ==================== FUNCTION ALIASES ====================
+# For backward compatibility with persistence manager imports
+
+def log_position(session_id: str, leg_number: int, symbol: str, atm_strike: int,
+                 strike: int, option_type: str, entry_price: float = None,
+                 quantity: int = None, initial_sl: float = None) -> Optional[int]:
+    """Alias for create_position - logs a new position"""
+    return create_position(session_id, leg_number, symbol, atm_strike,
+                          strike, option_type, entry_price, quantity, initial_sl)
+
+
+def update_position_status(position_id: int, status: str, exit_price: float = None,
+                           exit_time: datetime = None, realized_pnl: float = None,
+                           pnl_percentage: float = None) -> bool:
+    """Alias for update_position_exit - updates position status and exit details"""
+    if exit_time is None:
+        exit_time = datetime.now()
+    return update_position_exit(position_id, exit_time, exit_price or 0.0,
+                               realized_pnl or 0.0, pnl_percentage or 0.0, status)
+
+
+def log_order(session_id: str, order_type: str, symbol: str, side: str,
+              quantity: int, price: float = None, notes: str = None) -> Optional[int]:
+    """Alias for create_order - logs a new order"""
+    return create_order(session_id, order_type, symbol, side, quantity, price, notes)
+
+
+def update_order_status(order_id: int, status: str, broker_order_id: str = None,
+                       executed_price: float = None, executed_quantity: int = None,
+                       executed_time: datetime = None) -> bool:
+    """Alias for update_order_execution - updates order status"""
+    if executed_time is None:
+        executed_time = datetime.now()
+    return update_order_execution(order_id, broker_order_id or "", status,
+                                  executed_price, executed_quantity, executed_time)
+
+
+def log_event(session_id: str, event_type: str, description: str = None,
+              metadata: Dict = None) -> Optional[int]:
+    """Alias for create_event - logs a strategy event"""
+    return create_event(session_id, event_type, description, data=metadata)
 
 # Initialize tables on import
 try:
     init_db()
 except Exception as e:
-    logger.warning(f"⚠️  Could not initialize DB tables on import: {e}")
+    logger.warning(f"âš ï¸  Could not initialize DB tables on import: {e}")

@@ -31,13 +31,13 @@ strategy:
   # RUN IMMEDIATELY ON STARTUP: Set to true to execute strategy immediately (bypass scheduler)
   # Useful for testing/debugging without waiting for scheduled time
   # When true: Strategy runs now, then scheduler continues for future scheduled runs
-  run_immediately_on_startup: True
+  run_immediately_on_startup: true
 
 # Scheduling
 schedule:
   # Start time in IST (24-hour format)
-  start_hour: 10
-  start_minute: 0
+  start_hour: 09
+  start_minute: 30
   
   # End time in IST (when to stop monitoring)
   end_hour: 15
@@ -82,7 +82,7 @@ position:
 # Order Configuration
 orders:
   # Auto place orders (False = dry run mode, True = live trading)
-  auto_place_orders: false
+  auto_place_orders: true
   
   # Instrument type for API calls ("options" for options trading)
   instrument_type: "options"
@@ -123,6 +123,14 @@ atm_monitoring:
   
   # Close positions if ATM changes (True = exit and re-enter with new ATM)
   close_on_atm_change: true
+  
+  # ATM strike change buffer (in index points)
+  # Only trigger ATM change if underlying moves beyond this buffer from current strike
+  # Example: For NIFTY strike 26250, if buffer=20:
+  #   - ATM change triggered only if underlying > 26270 or < 26230
+  #   - Prevents frequent resets when price hovers near strike boundary
+  # Recommended: 20-50 for NIFTY, 50-100 for BANKNIFTY, 100-200 for SENSEX
+  atm_strike_change_buffer: 20
 
 # Leg Specifications
 legs:
@@ -132,6 +140,16 @@ legs:
   
   # If monitoring only one leg, specify which one
   single_leg_type: null  # "CE" or "PE" or null for both
+  
+  # Strike selection for CE leg
+  # Options: "ATM" (at-the-money), "ITM1"-"ITM5" (in-the-money), "OTM1"-"OTM5" (out-of-the-money)
+  # Example: "ATM" = strike closest to spot, "ITM1" = 1 strike in-the-money, "OTM1" = 1 strike out-of-the-money
+  ce_strike_selection: "ITM2"
+  
+  # Strike selection for PE leg
+  # Options: "ATM" (at-the-money), "ITM1"-"ITM5" (in-the-money), "OTM1"-"OTM5" (out-of-the-money)
+  # Example: "ATM" = strike closest to spot, "ITM1" = 1 strike in-the-money, "OTM1" = 1 strike out-of-the-money
+  pe_strike_selection: "ITM2"
 
 # WebSocket Configuration (Real-time LTP Streaming)
 websocket:

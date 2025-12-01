@@ -145,7 +145,7 @@ class WebSocketLTPClient:
             exchange: Exchange (e.g., "NFO")
         
         Returns:
-            True if subscription successful, False otherwise
+            True if subscription sent successfully, False otherwise
         """
         if not self.connected or not self.websocket:
             return False
@@ -159,19 +159,10 @@ class WebSocketLTPClient:
             }
             await self.websocket.send(json.dumps(subscribe_msg))
             
-            # Wait for subscription confirmation
-            response = await asyncio.wait_for(
-                self.websocket.recv(),
-                timeout=self.timeout_seconds
-            )
-            sub_response = json.loads(response)
-            
-            if sub_response.get("status") == "success":
-                self.logger.info(f"✓ Subscribed to LTP for {exchange}:{symbol}")
-                return True
-            else:
-                self.logger.warning(f"⚠️  LTP subscription response: {sub_response}")
-                return False
+            # Don't wait for response if receive loop is running
+            # The receive loop will handle subscription confirmations
+            self.logger.info(f"✓ Subscription request sent for LTP: {exchange}:{symbol}")
+            return True
         
         except Exception as e:
             self.logger.error(f"✗ Error subscribing to {symbol}: {e}")
@@ -187,7 +178,7 @@ class WebSocketLTPClient:
             depth_level: Depth level for bid/ask (default 5)
         
         Returns:
-            True if subscription successful, False otherwise
+            True if subscription sent successfully, False otherwise
         """
         if not self.connected or not self.websocket:
             return False
@@ -202,18 +193,9 @@ class WebSocketLTPClient:
             }
             await self.websocket.send(json.dumps(subscribe_msg))
             
-            response = await asyncio.wait_for(
-                self.websocket.recv(),
-                timeout=self.timeout_seconds
-            )
-            sub_response = json.loads(response)
-            
-            if sub_response.get("status") == "success":
-                self.logger.info(f"✓ Subscribed to Quote for {exchange}:{symbol}")
-                return True
-            else:
-                self.logger.warning(f"⚠️  Quote subscription response: {sub_response}")
-                return False
+            # Don't wait for response if receive loop is running
+            self.logger.info(f"✓ Subscription request sent for Quote: {exchange}:{symbol}")
+            return True
         
         except Exception as e:
             self.logger.error(f"✗ Error subscribing to quote for {symbol}: {e}")
@@ -229,7 +211,7 @@ class WebSocketLTPClient:
             depth_level: Depth level (5, 10, 20, etc.)
         
         Returns:
-            True if subscription successful, False otherwise
+            True if subscription sent successfully, False otherwise
         """
         if not self.connected or not self.websocket:
             return False
@@ -244,18 +226,9 @@ class WebSocketLTPClient:
             }
             await self.websocket.send(json.dumps(subscribe_msg))
             
-            response = await asyncio.wait_for(
-                self.websocket.recv(),
-                timeout=self.timeout_seconds
-            )
-            sub_response = json.loads(response)
-            
-            if sub_response.get("status") == "success":
-                self.logger.info(f"✓ Subscribed to Depth (L{depth_level}) for {exchange}:{symbol}")
-                return True
-            else:
-                self.logger.warning(f"⚠️  Depth subscription response: {sub_response}")
-                return False
+            # Don't wait for response if receive loop is running
+            self.logger.info(f"✓ Subscription request sent for Depth (L{depth_level}): {exchange}:{symbol}")
+            return True
         
         except Exception as e:
             self.logger.error(f"✗ Error subscribing to depth for {symbol}: {e}")
@@ -302,8 +275,17 @@ class WebSocketLTPClient:
                     )
                     data = json.loads(response)
                     
+                    # Handle subscription confirmations
+                    if data.get("action") == "subscribe" and data.get("status"):
+                        symbol = data.get("symbol", "unknown")
+                        status = data.get("status")
+                        if status == "success":
+                            self.logger.debug(f"✓ Subscription confirmed: {symbol}")
+                        else:
+                            self.logger.warning(f"⚠️  Subscription failed: {symbol} - {data.get('message', 'Unknown error')}")
+                    
                     # Process market data
-                    if data.get("type") == "market_data":
+                    elif data.get("type") == "market_data":
                         market_data = data.get("data", {})
                         symbol = data.get("symbol")
                         ltp = market_data.get("ltp")
@@ -398,6 +380,62 @@ class WebSocketLTPClient:
     def is_connected(self) -> bool:
         """Check if WebSocket is connected and authenticated"""
         return self.connected and self.authenticated
+    
+    def subscribe_ltp_sync(self, symbol: str, exchange: str) -> bool:
+        """
+        Thread-safe synchronous wrapper for LTP subscription.
+        Schedules subscription in the background event loop.
+        
+        Args:
+            symbol: Symbol to subscribe
+            exchange: Exchange
+        
+        Returns:
+            True if subscription was scheduled, False if not connected
+        """
+        if not self._loop or not self.connected:
+            self.logger.warning(f"⚠️  Cannot subscribe - WebSocket not connected")
+            return False
+        
+        try:
+            # Schedule coroutine in the background loop
+            future = asyncio.run_coroutine_threadsafe(
+                self.subscribe_ltp(symbol, exchange),
+                self._loop
+            )
+            # Wait for result with timeout
+            result = future.result(timeout=self.timeout_seconds)
+            return result
+        except Exception as e:
+            self.logger.error(f"✗ Error in sync LTP subscription for {symbol}: {e}")
+            return False
+    
+    def subscribe_quote_sync(self, symbol: str, exchange: str, depth_level: int = 5) -> bool:
+        """
+        Thread-safe synchronous wrapper for quote subscription.
+        
+        Args:
+            symbol: Symbol to subscribe
+            exchange: Exchange
+            depth_level: Depth level for bid/ask
+        
+        Returns:
+            True if subscription was scheduled, False if not connected
+        """
+        if not self._loop or not self.connected:
+            self.logger.warning(f"⚠️  Cannot subscribe - WebSocket not connected")
+            return False
+        
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self.subscribe_quote(symbol, exchange, depth_level),
+                self._loop
+            )
+            result = future.result(timeout=self.timeout_seconds)
+            return result
+        except Exception as e:
+            self.logger.error(f"✗ Error in sync quote subscription for {symbol}: {e}")
+            return False
 
 
 def create_websocket_client(

@@ -8,19 +8,43 @@
             <h1 class="text-2xl md:text-3xl font-bold text-base-content">Trading Dashboard</h1>
             <p class="text-base-content/60 mt-1 md:mt-2 text-sm md:text-base">Overview of your trading account and market positions</p>
         </div>
-        <!-- Master Contract Status Indicator -->
-        <div class="flex items-center gap-2 md:gap-3 bg-base-200 rounded-lg px-3 md:px-4 py-2 md:py-3 w-fit lg:ml-auto lg:self-start">
-            <span class="text-xs md:text-sm font-medium whitespace-nowrap">Master Contract:</span>
-            <div class="flex items-center gap-2">
-                <div id="master-contract-led" class="w-2.5 h-2.5 md:w-3 md:h-3 rounded-full bg-gray-400 animate-pulse"></div>
-                <span id="master-contract-status-text" class="text-xs md:text-sm">Checking...</span>
+        <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 md:gap-3 lg:ml-auto">
+            <!-- Master Contract Status Indicator -->
+            <div class="flex items-center gap-2 md:gap-3 bg-base-200 rounded-lg px-3 md:px-4 py-2 md:py-3">
+                <span class="text-xs md:text-sm font-medium whitespace-nowrap">Master Contract:</span>
+                <div class="flex items-center gap-2">
+                    <div id="master-contract-led" class="w-2.5 h-2.5 md:w-3 md:h-3 rounded-full bg-gray-400 animate-pulse"></div>
+                    <span id="master-contract-status-text" class="text-xs md:text-sm">Checking...</span>
+                </div>
+            </div>
+            <!-- Auto-Refresh Controls -->
+            <div class="flex items-center gap-2 bg-base-200 rounded-lg px-3 md:px-4 py-2 md:py-3">
+                <div class="flex items-center gap-2">
+                    <input type="checkbox" id="auto-refresh-toggle" class="toggle toggle-success toggle-sm" />
+                    <span class="text-xs md:text-sm font-medium whitespace-nowrap">Auto-refresh</span>
+                </div>
+                <select id="refresh-interval" class="select select-xs bg-base-100 border-base-300">
+                    <option value="3000">3s</option>
+                    <option value="5000" selected>5s</option>
+                    <option value="10000">10s</option>
+                    <option value="30000">30s</option>
+                </select>
+                <button id="manual-refresh-btn" class="btn btn-xs btn-circle btn-ghost" title="Refresh now">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                </button>
             </div>
         </div>
+    </div>
+    <!-- Last Updated Indicator -->
+    <div class="mt-2 text-right">
+        <span id="last-updated" class="text-xs text-base-content/50">Last updated: Just now</span>
     </div>
 </div>
 
 <!-- Stats Grid -->
-<div class="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-4 md:gap-6 mb-8 md:mb-16">
+<div id="stats-grid" class="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-4 md:gap-6 mb-8 md:mb-16">
     <!-- Available Balance -->
     <div class="stat-card">
         <div class="stat">
@@ -201,6 +225,49 @@
     </div>
 </div>
 
+<style>
+/* Loading state animation */
+.stat-card.loading {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+.stat-card.loading::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(255, 255, 255, 0.1) 50%,
+        transparent 100%
+    );
+    animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+.stat-card {
+    position: relative;
+    overflow: hidden;
+}
+
+#manual-refresh-btn.refreshing svg {
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+</style>
+
 <script>
 // Master Contract Status LED Controller
 class MasterContractStatus {
@@ -314,15 +381,228 @@ class MasterContractStatus {
     }
 }
 
+// Auto-Refresh Manager for Funds Data
+class FundsAutoRefresh {
+    constructor() {
+        this.refreshInterval = null;
+        this.isRefreshing = false;
+        this.lastUpdateTime = Date.now();
+        this.toggle = document.getElementById('auto-refresh-toggle');
+        this.intervalSelect = document.getElementById('refresh-interval');
+        this.manualBtn = document.getElementById('manual-refresh-btn');
+        this.lastUpdatedEl = document.getElementById('last-updated');
+        this.statsGrid = document.getElementById('stats-grid');
+        this.init();
+    }
+
+    init() {
+        // Load saved preferences
+        const savedEnabled = localStorage.getItem('dashboard-auto-refresh-enabled');
+        const savedInterval = localStorage.getItem('dashboard-auto-refresh-interval');
+        
+        if (savedEnabled === 'true') {
+            this.toggle.checked = true;
+            this.startAutoRefresh();
+        }
+        
+        if (savedInterval) {
+            this.intervalSelect.value = savedInterval;
+        }
+
+        // Event listeners
+        this.toggle.addEventListener('change', () => this.handleToggleChange());
+        this.intervalSelect.addEventListener('change', () => this.handleIntervalChange());
+        this.manualBtn.addEventListener('click', () => this.refreshNow());
+
+        // Update "last updated" timestamp every second
+        setInterval(() => this.updateLastUpdatedText(), 1000);
+    }
+
+    handleToggleChange() {
+        if (this.toggle.checked) {
+            this.startAutoRefresh();
+            localStorage.setItem('dashboard-auto-refresh-enabled', 'true');
+        } else {
+            this.stopAutoRefresh();
+            localStorage.setItem('dashboard-auto-refresh-enabled', 'false');
+        }
+    }
+
+    handleIntervalChange() {
+        localStorage.setItem('dashboard-auto-refresh-interval', this.intervalSelect.value);
+        if (this.toggle.checked) {
+            this.stopAutoRefresh();
+            this.startAutoRefresh();
+        }
+    }
+
+    startAutoRefresh() {
+        if (this.refreshInterval) {
+            clearInterval(this.refreshInterval);
+        }
+        const interval = parseInt(this.intervalSelect.value);
+        this.refreshInterval = setInterval(() => this.fetchFundsData(), interval);
+        console.log(`Auto-refresh started with ${interval}ms interval`);
+    }
+
+    stopAutoRefresh() {
+        if (this.refreshInterval) {
+            clearInterval(this.refreshInterval);
+            this.refreshInterval = null;
+            console.log('Auto-refresh stopped');
+        }
+    }
+
+    async refreshNow() {
+        if (this.isRefreshing) return;
+        await this.fetchFundsData();
+    }
+
+    async fetchFundsData() {
+        // Skip if session expired
+        if (window.sessionExpired) {
+            this.stopAutoRefresh();
+            return;
+        }
+
+        if (this.isRefreshing) return;
+        
+        this.isRefreshing = true;
+        this.manualBtn.classList.add('refreshing');
+        this.statsGrid.classList.add('loading');
+
+        try {
+            const response = await fetch('/api/funds', {
+                method: 'GET',
+                headers: {
+                    'Accept': 'application/json'
+                }
+            });
+
+            // Handle session expiry
+            if (response.status === 401) {
+                this.stopAutoRefresh();
+                if (typeof window.handleSessionExpiry === 'function') {
+                    window.handleSessionExpiry();
+                } else {
+                    window.location.href = '/auth/login';
+                }
+                return;
+            }
+
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                this.updateDashboard(result.data);
+                this.lastUpdateTime = Date.now();
+                this.updateLastUpdatedText();
+            } else {
+                console.error('Failed to fetch funds data:', result.message);
+            }
+        } catch (error) {
+            console.error('Error fetching funds data:', error);
+            // Don't stop auto-refresh on error - might be temporary network issue
+        } finally {
+            this.isRefreshing = false;
+            this.manualBtn.classList.remove('refreshing');
+            this.statsGrid.classList.remove('loading');
+        }
+    }
+
+    updateDashboard(data) {
+        // Helper to format Indian number format
+        const formatIndian = (value) => {
+            if (!value || value === '0.00') return '0.00';
+            const num = parseFloat(value.toString().replace(/,/g, ''));
+            return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        };
+
+        // Update Available Balance
+        const availableCash = data.availablecash || '0.00';
+        document.querySelector('.stat-card:nth-child(1) .stat-value').textContent = formatIndian(availableCash);
+
+        // Update Collateral
+        const collateral = data.collateral || '0.00';
+        document.querySelector('.stat-card:nth-child(2) .stat-value').textContent = formatIndian(collateral);
+
+        // Update Unrealized P&L
+        const unrealizedPnl = parseFloat((data.m2munrealized || '0.00').toString().replace(/,/g, ''));
+        const unrealizedEl = document.querySelector('.stat-card:nth-child(3) .stat-value');
+        unrealizedEl.textContent = formatIndian(unrealizedPnl);
+        unrealizedEl.className = `stat-value ${
+            unrealizedPnl > 0 ? 'text-success' : 
+            unrealizedPnl < 0 ? 'text-error' : 'text-neutral'
+        }`;
+        
+        const unrealizedBadge = document.querySelector('.stat-card:nth-child(3) .badge');
+        unrealizedBadge.className = `badge ${
+            unrealizedPnl > 0 ? 'badge-success' : 
+            unrealizedPnl < 0 ? 'badge-error' : 'badge-neutral'
+        }`;
+
+        // Update Realized P&L
+        const realizedPnl = parseFloat((data.m2mrealized || '0.00').toString().replace(/,/g, ''));
+        const realizedEl = document.querySelector('.stat-card:nth-child(4) .stat-value');
+        realizedEl.textContent = formatIndian(realizedPnl);
+        realizedEl.className = `stat-value ${
+            realizedPnl > 0 ? 'text-success' : 
+            realizedPnl < 0 ? 'text-error' : 'text-neutral'
+        }`;
+        
+        const realizedBadge = document.querySelector('.stat-card:nth-child(4) .badge');
+        realizedBadge.className = `badge ${
+            realizedPnl > 0 ? 'badge-success' : 
+            realizedPnl < 0 ? 'badge-error' : 'badge-neutral'
+        }`;
+
+        // Update Utilised Margin
+        const utilisedDebits = data.utiliseddebits || '0.00';
+        document.querySelector('.stat-card:nth-child(5) .stat-value').textContent = formatIndian(utilisedDebits);
+    }
+
+    updateLastUpdatedText() {
+        const seconds = Math.floor((Date.now() - this.lastUpdateTime) / 1000);
+        let text;
+        
+        if (seconds < 5) {
+            text = 'Last updated: Just now';
+        } else if (seconds < 60) {
+            text = `Last updated: ${seconds}s ago`;
+        } else {
+            const minutes = Math.floor(seconds / 60);
+            text = `Last updated: ${minutes}m ago`;
+        }
+
+        this.lastUpdatedEl.textContent = text;
+        
+        // Change color based on freshness
+        if (seconds < 10) {
+            this.lastUpdatedEl.className = 'text-xs text-success/70';
+        } else if (seconds < 30) {
+            this.lastUpdatedEl.className = 'text-xs text-base-content/50';
+        } else {
+            this.lastUpdatedEl.className = 'text-xs text-warning/70';
+        }
+    }
+
+    destroy() {
+        this.stopAutoRefresh();
+    }
+}
+
 // Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     window.masterContractStatus = new MasterContractStatus();
+    window.fundsAutoRefresh = new FundsAutoRefresh();
 });
 
 // Cleanup on page unload
 window.addEventListener('beforeunload', () => {
     if (window.masterContractStatus) {
         window.masterContractStatus.destroy();
+    }
+    if (window.fundsAutoRefresh) {
+        window.fundsAutoRefresh.destroy();
     }
 });
 </script>

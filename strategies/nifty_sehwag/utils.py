@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def is_market_open(tz=pytz.timezone('Asia/Kolkata')) -> bool:
-    return True
+    # return True
     """Check if market is currently open"""
     now = datetime.now(tz)
     current_time = now.time()
