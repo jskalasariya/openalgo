@@ -21,12 +21,12 @@ strategy:
   timezone: "Asia/Kolkata"
   
   # Only run on expiry day (True/False)
-  run_only_on_expiry_day: false
+  run_only_on_expiry_day: true
   
   # TEST MODE: Set to true to simulate all strategy logic WITHOUT placing actual orders
   # Perfect for backtesting over multiple expiries before going live
   # When true: All entries/exits tracked in DB, but NO orders sent to broker
-  test_mode: false
+  test_mode: true
   
   # RUN IMMEDIATELY ON STARTUP: Set to true to execute strategy immediately (bypass scheduler)
   # Useful for testing/debugging without waiting for scheduled time
@@ -55,7 +55,7 @@ monitoring:
   lookback_candles: 5
   
   # Breakout threshold (additional % above highest high, 0 means breakout at highest high)
-  breakout_threshold_pct: 0.0
+  breakout_threshold_pct: 0.05
 
 # Position Management
 position:
@@ -65,7 +65,7 @@ position:
   # Lot multiplier - quantity will be multiplied by this value
   # Final quantity = entry_quantity * lot_multiplier
   # Example: entry_quantity=75, lot_multiplier=2 → final quantity = 150
-  lot_multiplier: 1
+  lot_multiplier: 10
   
   # Initial stop loss as percentage of entry price (0.50 = 50%)
   initial_stop_pct: 0.50
@@ -74,15 +74,39 @@ position:
   trail_step_pct: 0.01
   
   # Profit target as percentage of entry price (1.00 = 100%)
-  profit_target_pct: 1.00
+  profit_target_pct: 1.50
   
   # ATM check interval - re-check ATM every N candles to see if it has changed
   atm_recheck_interval: 5
+  
+  # Move SL to Cost Feature
+  # Enable moving stop loss to entry price + offset once profit reaches threshold
+  move_sl_to_cost_enabled: true
+  
+  # Profit threshold to trigger move SL to cost (0.10 = 10%)
+  # When profit reaches this percentage, SL will be moved to entry + sl_cost_offset_pct
+  move_sl_profit_threshold_pct: 0.30
+  
+  # Offset to add to entry price when moving SL to cost (0.02 = 2%)
+  # Example: Entry at 100, sl_cost_offset_pct=0.02 → SL moves to 102 (cost + 2%)
+  sl_cost_offset_pct: 0.02
+  
+  # Profit Trailing Feature
+  # Enable trailing profit target - moves profit target as profit increases
+  profit_trailing_enabled: true
+  
+  # Profit step for trailing (0.05 = 5%)
+  # For every profit_trailing_step_pct profit, profit target moves by profit_trailing_increment_pct
+  profit_trailing_step_pct: 0.05
+  
+  # Profit target increment per step (0.01 = 1%)
+  # Example: Every 5% profit move, target moves up by 1%
+  profit_trailing_increment_pct: 0.01
 
 # Order Configuration
 orders:
   # Auto place orders (False = dry run mode, True = live trading)
-  auto_place_orders: true
+  auto_place_orders: false
   
   # Instrument type for API calls ("options" for options trading)
   instrument_type: "options"
@@ -119,7 +143,7 @@ atm_monitoring:
   monitor_atm_changes: true
   
   # ATM check interval in minutes (check if ATM has changed every N minutes)
-  atm_check_interval_minutes: 5
+  atm_check_interval_minutes: 3
   
   # Close positions if ATM changes (True = exit and re-enter with new ATM)
   close_on_atm_change: true
@@ -144,12 +168,12 @@ legs:
   # Strike selection for CE leg
   # Options: "ATM" (at-the-money), "ITM1"-"ITM5" (in-the-money), "OTM1"-"OTM5" (out-of-the-money)
   # Example: "ATM" = strike closest to spot, "ITM1" = 1 strike in-the-money, "OTM1" = 1 strike out-of-the-money
-  ce_strike_selection: "ITM2"
+  ce_strike_selection: "ATM"
   
   # Strike selection for PE leg
   # Options: "ATM" (at-the-money), "ITM1"-"ITM5" (in-the-money), "OTM1"-"OTM5" (out-of-the-money)
   # Example: "ATM" = strike closest to spot, "ITM1" = 1 strike in-the-money, "OTM1" = 1 strike out-of-the-money
-  pe_strike_selection: "ITM2"
+  pe_strike_selection: "ATM"
 
 # WebSocket Configuration (Real-time LTP Streaming)
 websocket:

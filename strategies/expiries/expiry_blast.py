@@ -186,6 +186,16 @@ TRAIL_PERCENT_STEP = float(config_loader.get('position', 'trail_step_pct', 0.01)
 PROFIT_TARGET_PCT = float(config_loader.get('position', 'profit_target_pct', 1.00))
 ATM_RECHECK_INTERVAL = int(config_loader.get('position', 'atm_recheck_interval', 5))
 
+# Move SL to Cost Feature Configuration
+MOVE_SL_TO_COST_ENABLED = config_loader.get('position', 'move_sl_to_cost_enabled', True)
+MOVE_SL_PROFIT_THRESHOLD_PCT = float(config_loader.get('position', 'move_sl_profit_threshold_pct', 0.10))
+SL_COST_OFFSET_PCT = float(config_loader.get('position', 'sl_cost_offset_pct', 0.02))
+
+# Profit Trailing Feature Configuration
+PROFIT_TRAILING_ENABLED = config_loader.get('position', 'profit_trailing_enabled', True)
+PROFIT_TRAILING_STEP_PCT = float(config_loader.get('position', 'profit_trailing_step_pct', 0.05))
+PROFIT_TRAILING_INCREMENT_PCT = float(config_loader.get('position', 'profit_trailing_increment_pct', 0.01))
+
 AUTO_PLACE_ORDERS = config_loader.get('orders', 'auto_place_orders', False)
 PRICE_TYPE = config_loader.get('orders', 'price_type', 'MARKET')
 PRODUCT = config_loader.get('orders', 'product', 'NRML')
@@ -236,6 +246,8 @@ logger.info(f"Auto Place Orders: {AUTO_PLACE_ORDERS}")
 logger.info(f"Monitor ATM Changes: {MONITOR_ATM_CHANGES} (Buffer: {ATM_STRIKE_CHANGE_BUFFER} points)")
 logger.info(f"WebSocket: {'📡 ENABLED' if USE_WEBSOCKET else '🔄 DISABLED (REST API polling)'} @ {WEBSOCKET_URL if USE_WEBSOCKET else 'N/A'}")
 logger.info(f"TEST MODE: {'🟢 ENABLED (Orders simulated, not placed)' if TEST_MODE else '🔴 DISABLED (Live trading)'}")
+logger.info(f"Move SL to Cost: {'✅ ENABLED' if MOVE_SL_TO_COST_ENABLED else '❌ DISABLED'} (Threshold: {MOVE_SL_PROFIT_THRESHOLD_PCT*100:.0f}%, Offset: {SL_COST_OFFSET_PCT*100:.0f}%)")
+logger.info(f"Profit Trailing: {'✅ ENABLED' if PROFIT_TRAILING_ENABLED else '❌ DISABLED'} (Step: {PROFIT_TRAILING_STEP_PCT*100:.0f}%, Increment: {PROFIT_TRAILING_INCREMENT_PCT*100:.0f}%)")
 logger.info(f"{'='*60}\n")
 
 # ==================== TICK SIZE UTILITIES ====================
@@ -544,8 +556,8 @@ def fetch_last_candles(symbol: str) -> pd.DataFrame:
                 logger.info(f"  {timestamp_str} | {row['open']:7.2f} | {row['high']:7.2f} | {row['low']:7.2f} | {row['close']:7.2f} | {row['volume']:10,.0f}")
             
             logger.info(f"{'='*95}")
-            total_volume = df['volume'].sum()
-            logger.info(f"  📈 Highest High: {df['high'].max():.2f} | 📉 Lowest Low: {df['low'].min():.2f} | 📊 Total Volume: {total_volume:,.0f}")
+            avg_price = df['close'].mean()
+            logger.info(f"  📈 Highest High: {df['high'].max():.2f} | 📉 Lowest Low: {df['low'].min():.2f} | 📊 Average Price: {avg_price:.2f}")
             logger.info(f"{'='*95}\n")
         
         return df
@@ -635,6 +647,10 @@ class PositionState:
     current_strike: float
     position_id: Optional[str] = None  # Persistence tracking
     sl_order_id: Optional[str] = None  # Broker-side stop-loss order ID
+    sl_moved_to_cost: bool = False  # Track if SL has been moved to cost+offset
+    profit_trailing_level: float = 0.0  # Track current profit trailing level
+    exit_triggered: bool = False  # Prevent re-entry after SL/profit exit
+    position_ever_opened: bool = False  # Track if position was ever opened in this session
 
 
 class LegMonitor:
@@ -656,7 +672,10 @@ class LegMonitor:
             last_atm_check=0,
             current_strike=strike,
             position_id=None,
-            sl_order_id=None
+            sl_order_id=None,
+            sl_moved_to_cost=False,
+            profit_trailing_level=0.0,
+            exit_triggered=False
         )
         self.candle_count = 0
         self.highest_high = 0
@@ -809,15 +828,27 @@ class LegMonitor:
             
             # ========== NO POSITION: CHECK ATM & ENTRY ==========
             if not self.state.position_open:
+                # If position was already exited (SL/profit), don't re-enter
+                if self.state.exit_triggered:
+                    if iteration % 20 == 0:  # Log occasionally
+                        logger.info(f"ℹ️  {self.leg_type} monitor idle (position already exited)")
+                    time.sleep(CHECK_SLEEP)
+                    continue
+                
                 # Update breakout levels dynamically (only when waiting for entry)
                 self.update_breakout_levels()
                 
                 # Check if ATM has changed (only when no position)
                 if self.check_atm_changed() and CLOSE_ON_ATM_CHANGE:
                     logger.info(f"🔄 ATM changed. Resetting {self.leg_type} monitor for new ATM strike.")
-                    # Reset for new ATM
+                    # Reset for new ATM - but preserve position_ever_opened flag
+                    position_was_opened = self.state.position_ever_opened
                     self.initialize()
                     self.state.last_trail_level = 0
+                    self.state.position_ever_opened = position_was_opened  # Preserve session-level flag
+                    if position_was_opened:
+                        self.state.exit_triggered = True  # Prevent re-entry if position was opened before
+                        logger.info(f"⏸️ {self.leg_type} position was already opened this session. Staying in idle mode.")
                     continue
                 
                 # Entry logic: Check for breakout
@@ -825,6 +856,7 @@ class LegMonitor:
                     self.state.entry_price = ltp
                     self.state.entry_time = datetime.now(TZ)
                     self.state.position_open = True
+                    self.state.position_ever_opened = True  # Mark that position was opened in this session
                     self.state.stop_price = round_to_tick_size(ltp * (1 - INITIAL_STOP_PCT))
                     self.state.highest_price = ltp
                     self.state.last_trail_level = 0
@@ -842,15 +874,23 @@ class LegMonitor:
                         except Exception as e:
                             logger.error(f"✗ Error saving position entry to persistence: {e}")
                     
+                    # Calculate entry details
+                    num_lots = LOT_MULTIPLIER
+                    risk_per_unit = self.state.entry_price - self.state.stop_price
+                    total_risk = risk_per_unit * FINAL_QUANTITY
+                    total_value = self.state.entry_price * FINAL_QUANTITY
+                    
                     entry_msg = (
-                        f"\n{'='*60}\n"
+                        f"\n{'='*70}\n"
                         f"✅ ENTRY SIGNAL: {self.leg_type}\n"
                         f"   Symbol: {self.symbol}\n"
-                        f"   Entry Price: {self.state.entry_price:.2f}\n"
-                        f"   Stop Loss: {self.state.stop_price:.2f}\n"
-                        f"   Quantity: {ENTRY_QUANTITY}\n"
+                        f"   Entry Price: ₹{self.state.entry_price:.2f}\n"
+                        f"   Stop Loss: ₹{self.state.stop_price:.2f} (Risk: ₹{risk_per_unit:.2f}/unit)\n"
+                        f"   Quantity: {FINAL_QUANTITY} ({ENTRY_QUANTITY} x {num_lots} lot{'s' if num_lots > 1 else ''})\n"
+                        f"   Total Value: ₹{total_value:,.2f}\n"
+                        f"   Total Risk: ₹{total_risk:,.2f}\n"
                         f"   Time: {self.state.entry_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                        f"{'='*60}\n"
+                        f"{'='*70}\n"
                     )
                     logger.info(entry_msg)
                     
@@ -884,17 +924,80 @@ class LegMonitor:
                     except Exception as e:
                         logger.error(f"✗ Error queuing position update to persistence: {e}")
                 
-                # Check for 100% profit exit
-                if profit_pct >= PROFIT_TARGET_PCT:
+                # ========== NEW FEATURE: MOVE SL TO COST ==========
+                # Once profit reaches threshold, move SL to entry + offset (e.g., cost + 2%)
+                if MOVE_SL_TO_COST_ENABLED and not self.state.sl_moved_to_cost:
+                    if profit_pct >= MOVE_SL_PROFIT_THRESHOLD_PCT:
+                        cost_plus_offset = round_to_tick_size(self.state.entry_price * (1 + SL_COST_OFFSET_PCT))
+                        
+                        # Only move if new stop is higher than current stop
+                        if cost_plus_offset > self.state.stop_price:
+                            old_stop = self.state.stop_price
+                            self.state.stop_price = cost_plus_offset
+                            self.state.sl_moved_to_cost = True
+                            
+                            # Modify broker-side SL order
+                            if self.state.sl_order_id:
+                                logger.info(f"🔒 Moving SL to Cost+{SL_COST_OFFSET_PCT*100:.0f}% (Profit: {profit_pct*100:.1f}%)")
+                                logger.info(f"   Old SL: {old_stop:.2f} → New SL: {self.state.stop_price:.2f}")
+                                sl_modified = self._modify_sl_order(self.state.sl_order_id, self.state.stop_price)
+                                if not sl_modified:
+                                    logger.warning(f"⚠️  Failed to modify broker SL to cost - continuing with code monitoring")
+                            else:
+                                # No SL order ID but position is open - try to place new SL
+                                logger.warning(f"⚠️  No broker SL order ID found - attempting to place new SL order at cost")
+                                if PLACE_SL_ORDER:
+                                    new_sl_id = self._place_sl_order(self.state.stop_price)
+                                    if new_sl_id:
+                                        self.state.sl_order_id = new_sl_id
+                                        logger.info(f"✅ New SL order placed at cost: {new_sl_id} @ {self.state.stop_price:.2f}")
+                                    else:
+                                        logger.warning(f"⚠️  Failed to place new SL - using code-based monitoring only")
+                            
+                            if PRINT_POSITION_UPDATES:
+                                logger.info(f"🔒 {self.leg_type} SL Moved to Cost+{SL_COST_OFFSET_PCT*100:.0f}%: {old_stop:.2f} → {self.state.stop_price:.2f}")
+                
+                # ========== NEW FEATURE: PROFIT TRAILING ==========
+                # Calculate dynamic profit target based on profit levels
+                current_profit_target = PROFIT_TARGET_PCT
+                
+                if PROFIT_TRAILING_ENABLED and profit_pct > 0:
+                    # Calculate how many trailing steps have been achieved
+                    trailing_steps = int(profit_pct / PROFIT_TRAILING_STEP_PCT)
+                    
+                    # Update profit target based on trailing steps
+                    if trailing_steps > 0:
+                        # Add increment for each step achieved
+                        additional_target = trailing_steps * PROFIT_TRAILING_INCREMENT_PCT
+                        current_profit_target = PROFIT_TARGET_PCT + additional_target
+                        
+                        # Log when we cross a new trailing level
+                        if trailing_steps > self.state.profit_trailing_level:
+                            self.state.profit_trailing_level = trailing_steps
+                            if PRINT_POSITION_UPDATES:
+                                logger.info(f"📈 {self.leg_type} Profit Trailing Level {trailing_steps}: Target moved to {current_profit_target*100:.1f}% (Profit: {profit_pct*100:.1f}%)")
+                
+                # Check for profit target exit (using dynamic target)
+                if profit_pct >= current_profit_target:
+                    # Calculate profit details
+                    num_lots = LOT_MULTIPLIER
+                    profit_per_unit = gain_points
+                    total_profit = profit_per_unit * FINAL_QUANTITY
+                    entry_value = self.state.entry_price * FINAL_QUANTITY
+                    exit_value = ltp * FINAL_QUANTITY
+                    
                     exit_msg = (
-                        f"\n{'='*60}\n"
+                        f"\n{'='*70}\n"
                         f"🎯 PROFIT TARGET HIT: {self.leg_type}\n"
                         f"   Symbol: {self.symbol}\n"
-                        f"   Entry Price: {self.state.entry_price:.2f}\n"
-                        f"   Exit Price: {ltp:.2f}\n"
-                        f"   Profit: {gain_points:.2f} ({profit_pct*100:.1f}%)\n"
+                        f"   Entry Price: ₹{self.state.entry_price:.2f} | Exit Price: ₹{ltp:.2f}\n"
+                        f"   Profit per Unit: ₹{profit_per_unit:.2f} ({profit_pct*100:.1f}%)\n"
+                        f"   Quantity: {FINAL_QUANTITY} ({ENTRY_QUANTITY} x {num_lots} lot{'s' if num_lots > 1 else ''})\n"
+                        f"   Entry Value: ₹{entry_value:,.2f}\n"
+                        f"   Exit Value: ₹{exit_value:,.2f}\n"
+                        f"   Total Profit: ₹{total_profit:,.2f}\n"
                         f"   Exit Time: {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
-                        f"{'='*60}\n"
+                        f"{'='*70}\n"
                     )
                     logger.info(exit_msg)
                     
@@ -919,7 +1022,10 @@ class LegMonitor:
                         self._place_order(EXIT_ACTION, FINAL_QUANTITY)
                     
                     self.state.position_open = False
-                    break
+                    self.state.exit_triggered = True  # Prevent re-entry
+                    logger.info(f"✓ {self.leg_type} monitor entering idle mode (profit target reached)")
+                    # Continue monitoring but don't re-enter
+                    continue
                 
                 # Trailing stop logic - Move stop up by exactly the profit amount
                 if profit_pct > 0:
@@ -954,16 +1060,26 @@ class LegMonitor:
                 
                 # Check for stop loss
                 if ltp <= self.state.stop_price:
+                    # Calculate loss details
+                    num_lots = LOT_MULTIPLIER
+                    loss_per_unit = abs(gain_points)
+                    total_loss = loss_per_unit * FINAL_QUANTITY
+                    entry_value = self.state.entry_price * FINAL_QUANTITY
+                    exit_value = ltp * FINAL_QUANTITY
+                    
                     exit_msg = (
-                        f"\n{'='*60}\n"
+                        f"\n{'='*70}\n"
                         f"🛑 STOP LOSS HIT: {self.leg_type}\n"
                         f"   Symbol: {self.symbol}\n"
-                        f"   Entry Price: {self.state.entry_price:.2f}\n"
-                        f"   Exit Price: {ltp:.2f}\n"
-                        f"   Loss: {gain_points:.2f} ({profit_pct*100:.1f}%)\n"
+                        f"   Entry Price: ₹{self.state.entry_price:.2f} | Exit Price: ₹{ltp:.2f}\n"
+                        f"   Loss per Unit: ₹{loss_per_unit:.2f} ({profit_pct*100:.1f}%)\n"
+                        f"   Quantity: {FINAL_QUANTITY} ({ENTRY_QUANTITY} x {num_lots} lot{'s' if num_lots > 1 else ''})\n"
+                        f"   Entry Value: ₹{entry_value:,.2f}\n"
+                        f"   Exit Value: ₹{exit_value:,.2f}\n"
+                        f"   Total Loss: ₹{total_loss:,.2f}\n"
                         f"   Stop Price: {self.state.stop_price:.2f}\n"
                         f"   Exit Time: {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
-                        f"{'='*60}\n"
+                        f"{'='*70}\n"
                     )
                     logger.info(exit_msg)
                     
@@ -990,7 +1106,10 @@ class LegMonitor:
                         self._place_order(EXIT_ACTION, FINAL_QUANTITY)
                     
                     self.state.position_open = False
-                    break
+                    self.state.exit_triggered = True  # Prevent re-entry
+                    logger.info(f"✓ {self.leg_type} monitor entering idle mode (stop loss hit)")
+                    # Continue monitoring but don't re-enter
+                    continue
             
             time.sleep(CHECK_SLEEP)
     
@@ -1016,6 +1135,11 @@ class LegMonitor:
                     logger.debug(f"Retry {attempt + 1}/{max_retries} for order {order_id}")
                 
                 response = client.orderbook()
+                
+                # Log full response for debugging (only on first attempt)
+                if attempt == 0:
+                    logger.debug(f"📋 Orderbook API Response Type: {type(response)}")
+                    logger.debug(f"📋 Orderbook API Response: {response}")
                 
                 # Handle if response is a string (error message)
                 if isinstance(response, str):
@@ -1136,6 +1260,10 @@ class LegMonitor:
                 price=rounded_limit  # Limit price with buffer
             )
             
+            # Log full response for debugging
+            logger.debug(f"📤 SL PlaceOrder API Response Type: {type(response)}")
+            logger.debug(f"📤 SL PlaceOrder API Response: {response}")
+            
             if response.get('status') == 'success':
                 order_id = response.get('orderid')
                 logger.info(f"✅ SL order placed on broker! OrderID: {order_id} @ Trigger: {stop_price:.2f}")
@@ -1167,6 +1295,10 @@ class LegMonitor:
         
         try:
             response = client.positionbook()
+            
+            # Log full response for debugging
+            logger.debug(f"📊 Positionbook API Response Type: {type(response)}")
+            logger.debug(f"📊 Positionbook API Response: {response}")
             
             if isinstance(response, str):
                 logger.debug(f"Positionbook returned string: {response}")
@@ -1281,11 +1413,17 @@ class LegMonitor:
                 order_id=order_id
             )
             
+            # Log full response for debugging
+            logger.debug(f"📝 ModifyOrder API Response Type: {type(response)}")
+            logger.debug(f"📝 ModifyOrder API Response: {response}")
+            
             if response.get('status') == 'success':
                 logger.info(f"✅ SL order modified successfully! New trigger: {new_stop_price:.2f}")
                 return True
             else:
-                logger.error(f"✗ SL order modification failed: {response.get('message')}")
+                error_msg = response.get('message', 'Unknown error')
+                logger.error(f"✗ SL order modification failed: {error_msg}")
+                logger.error(f"   Full response: {response}")
                 return False
         
         except Exception as e:
@@ -1304,9 +1442,10 @@ class LegMonitor:
         try:
             logger.info(f"🗑️ Canceling SL order {order_id}")
             
+            # Use correct parameter name: order_id (not orderid)
             response = client.cancelorder(
                 strategy=f"expiry_blast_{self.leg_type}_SL",
-                orderid=order_id
+                order_id=order_id
             )
             
             if response.get('status') == 'success':
@@ -1361,6 +1500,10 @@ class LegMonitor:
                     quantity=quantity,
                     position_size=quantity  # Smart order adjusts based on current position
                 )
+                
+                # Log full response for debugging
+                logger.debug(f"📤 PlaceSmartOrder API Response Type: {type(response)}")
+                logger.debug(f"📤 PlaceSmartOrder API Response: {response}")
                 
                 if response.get('status') == 'success':
                     order_id = response.get('orderid')
