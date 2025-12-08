@@ -1,7 +1,7 @@
 """
 Nifty Sehwag Strategy Package
 ==============================
-Multi-leg options strategy for NIFTY expiry day trading.
+Multi-leg options strategy for NIFTY trading (runs every trading day).
 
 Refactored modular architecture (v2.0):
 - models.py: Data structures (LegPosition, StrategyState, LegSchedule)

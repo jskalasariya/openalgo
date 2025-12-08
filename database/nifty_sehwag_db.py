@@ -1,4 +1,4 @@
-﻿"""
+"""
 Nifty Sehwag Strategy Database Module
 =====================================
 Handles persistent storage of trade history, positions, and strategy execution logs
@@ -43,8 +43,21 @@ if 'sqlite' in DATABASE_URL:
     engine = create_engine(
         DATABASE_URL,
         poolclass=NullPool,
-        connect_args={'check_same_thread': False}
+        connect_args={
+            'check_same_thread': False,
+            'timeout': 30,  # 30 second timeout for locks
+            'isolation_level': None  # Autocommit mode
+        }
     )
+
+    # Enable WAL mode for better concurrent access
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")  # 30 seconds in milliseconds
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
 else:
     engine = create_engine(
         DATABASE_URL,
@@ -306,23 +319,42 @@ def init_db():
 # ==================== SESSION OPERATIONS ====================
 
 def create_session(session_id: str, expiry_date: str, notes: str = None) -> Optional[NiftySehwagSession]:
-    """Create a new strategy session"""
-    try:
-        session = NiftySehwagSession(
-            session_id=session_id,
-            expiry_date=expiry_date,
-            status='RUNNING',
-            start_time=datetime.now(),
-            notes=notes
-        )
-        db_session.add(session)
-        db_session.commit()
-        logger.info(f"âœ… Created session: {session_id}")
-        return session
-    except Exception as e:
-        logger.error(f"âŒ Error creating session: {e}")
-        db_session.rollback()
-        return None
+    """Create a new strategy session with retry logic for database locks"""
+    import time
+
+    # Ensure database is initialized
+    ensure_db_initialized()
+
+    max_retries = 3
+    retry_delay = 1  # seconds
+
+    for attempt in range(max_retries):
+        try:
+            session = NiftySehwagSession(
+                session_id=session_id,
+                expiry_date=expiry_date,
+                status='RUNNING',
+                start_time=datetime.now(),
+                notes=notes
+            )
+            db_session.add(session)
+            db_session.commit()
+            logger.info(f"✅ Created session: {session_id}")
+            return session
+        except Exception as e:
+            db_session.rollback()
+
+            # Check if it's a database lock error
+            if 'database is locked' in str(e).lower() and attempt < max_retries - 1:
+                logger.warning(f"⚠️  Database locked, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+                continue
+
+            logger.error(f"❌ Error creating session: {e}")
+            return None
+
+    return None
 
 
 def get_session(session_id: str) -> Optional[NiftySehwagSession]:
@@ -356,31 +388,38 @@ def update_session_status(session_id: str, status: str, notes: str = None) -> bo
 
 # ==================== POSITION OPERATIONS ====================
 
-def create_position(session_id: str, leg_number: int, symbol: str, atm_strike: int, 
-                   itm_level: int, sl_percentage: float, profit_target: float) -> Optional[NiftySehwagPosition]:
-    """Create a new position record"""
+def create_position(session_id: str, leg_number: int, symbol: str, atm_strike: int,
+                   strike: int, option_type: str, entry_price: float = None,
+                   quantity: int = None, initial_sl: float = None) -> Optional[int]:
+    """Create a new position record and return position ID"""
     try:
         session = get_session(session_id)
         if not session:
-            logger.error(f"âŒ Session not found: {session_id}")
+            logger.error(f"❌ Session not found: {session_id}")
             return None
         
+        # Calculate itm_level from strike and atm_strike difference
+        strike_diff = 50  # NIFTY default
+        itm_level = abs(strike - atm_strike) // strike_diff
+
         position = NiftySehwagPosition(
             session_id=session.id,
             leg_number=leg_number,
             symbol=symbol,
-            status='WAITING',
+            status='ENTERED' if entry_price else 'WAITING',
             atm_strike=atm_strike,
             itm_level=itm_level,
-            sl_percentage=sl_percentage,
-            profit_target=profit_target
+            entry_price=entry_price,
+            quantity=quantity,
+            sl_percentage=None,  # Can be updated later
+            profit_target=None   # Can be updated later
         )
         db_session.add(position)
         db_session.commit()
-        logger.info(f"âœ… Created position: Leg {leg_number} - {symbol}")
-        return position
+        logger.info(f"✅ Created position: Leg {leg_number} - {symbol} (ID: {position.id})")
+        return position.id
     except Exception as e:
-        logger.error(f"âŒ Error creating position: {e}")
+        logger.error(f"❌ Error creating position: {e}")
         db_session.rollback()
         return None
 
@@ -696,24 +735,47 @@ def update_position_status(position_id: int, status: str, exit_price: float = No
     """Alias for update_position_exit - updates position status and exit details"""
     if exit_time is None:
         exit_time = datetime.now()
-    return update_position_exit(position_id, exit_time, exit_price or 0.0,
-                               realized_pnl or 0.0, pnl_percentage or 0.0, status)
+    # update_position_exit(position_id, exit_time, exit_price, exit_quantity, exit_order_id, exit_reason, realized_pnl, pnl_percentage)
+    return update_position_exit(
+        position_id=position_id,
+        exit_time=exit_time,
+        exit_price=exit_price or 0.0,
+        exit_quantity=0,  # Not tracked in this alias
+        exit_order_id="",  # Not tracked in this alias
+        exit_reason=status,
+        realized_pnl=realized_pnl or 0.0,
+        pnl_percentage=pnl_percentage or 0.0
+    )
 
 
 def log_order(session_id: str, order_type: str, symbol: str, side: str,
-              quantity: int, price: float = None, notes: str = None) -> Optional[int]:
-    """Alias for create_order - logs a new order"""
-    return create_order(session_id, order_type, symbol, side, quantity, price, notes)
+              quantity: int, price: float = None, leg_number: int = None) -> Optional[int]:
+    """Alias for create_order - logs a new order and returns order ID"""
+    # create_order(session_id, order_type, symbol, side, quantity, price, leg_number, exchange)
+    order = create_order(
+        session_id=session_id,
+        order_type=order_type,
+        symbol=symbol,
+        side=side,
+        quantity=quantity,
+        price=price or 0.0,
+        leg_number=leg_number
+    )
+    return order.id if order else None
 
 
 def update_order_status(order_id: int, status: str, broker_order_id: str = None,
                        executed_price: float = None, executed_quantity: int = None,
                        executed_time: datetime = None) -> bool:
-    """Alias for update_order_execution - updates order status"""
-    if executed_time is None:
-        executed_time = datetime.now()
-    return update_order_execution(order_id, broker_order_id or "", status,
-                                  executed_price, executed_quantity, executed_time)
+    """Alias for update_order_execution - updates order status (executed_time is ignored, function sets it automatically)"""
+    # update_order_execution(order_id, broker_order_id, status, execution_price, executed_quantity)
+    return update_order_execution(
+        order_id=order_id,
+        broker_order_id=broker_order_id or "",
+        status=status,
+        execution_price=executed_price or 0.0,
+        executed_quantity=executed_quantity or 0
+    )
 
 
 def log_event(session_id: str, event_type: str, description: str = None,
@@ -721,8 +783,17 @@ def log_event(session_id: str, event_type: str, description: str = None,
     """Alias for create_event - logs a strategy event"""
     return create_event(session_id, event_type, description, data=metadata)
 
-# Initialize tables on import
-try:
-    init_db()
-except Exception as e:
-    logger.warning(f"âš ï¸  Could not initialize DB tables on import: {e}")
+# Don't initialize tables on import - do it lazily when first needed
+# This prevents database lock errors during module import
+_db_initialized = False
+
+def ensure_db_initialized():
+    """Ensure database is initialized (lazy initialization)"""
+    global _db_initialized
+    if not _db_initialized:
+        try:
+            init_db()
+            _db_initialized = True
+        except Exception as e:
+            logger.warning(f"⚠️  Could not initialize DB tables: {e}")
+            # Don't fail - allow strategy to continue without persistence

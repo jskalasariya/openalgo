@@ -94,23 +94,19 @@ class StrategyState:
 
 @dataclass
 class LegSchedule:
-    """Represents the schedule for a leg entry"""
+    """Represents the schedule for a leg entry and exit"""
     leg_num: int
     config: Dict
     entry_time: datetime
+    exit_time: Optional[datetime] = None
     entered: bool = False
     
     @property
     def name(self) -> str:
         """Get leg name from config"""
         return self.config.get('name', f'Leg {self.leg_num}')
-    
+
     @property
     def itm_level(self) -> int:
         """Get ITM level from config"""
         return self.config.get('itm_level', 3)
-    
-    @property
-    def management_type(self) -> str:
-        """Get management type from config"""
-        return self.config.get('management_type', 'fixed')

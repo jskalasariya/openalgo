@@ -297,8 +297,6 @@ def initialize_websocket():
 _CACHED_EXPIRY: Optional[str] = None
 
 def is_market_open() -> bool:
-    # # Jaysukh
-    # return True
     """Check if current time is within market hours"""
     now = datetime.now(TZ)
     current_time = now.time()

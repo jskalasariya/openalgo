@@ -33,8 +33,13 @@ class PositionManager:
     def manage_position(self, leg_num: int, leg_config: Dict, 
                        state: StrategyState, current_price: float) -> None:
         """
-        Generic position management - handles all leg types dynamically
-        
+        Unified position management with flexible configuration
+
+        Each leg can independently configure:
+        - Stop Loss (fixed or trailing)
+        - Profit locking (simple or escalating)
+        - Auto-close at target profit
+
         Args:
             leg_num: Leg number
             leg_config: Leg configuration
@@ -50,71 +55,44 @@ class PositionManager:
         leg_name = leg_config.get('name', f'Leg {leg_num}')
         logger.debug(f"{leg_name}: PnL {pnl_pct:.2f}%, SL: {leg.current_sl:.2f}, LTP: {current_price:.2f}")
         
-        # Check exit condition - SL breach
+        # 1. UPDATE TRAILING STOP LOSS (if configured)
+        sl_trail_pct = leg_config.get('sl_trail_pct')
+        if sl_trail_pct and pnl_pct > 0:
+            # Trail SL by keeping it sl_trail_pct% below current price
+            new_sl = current_price * (1 - sl_trail_pct / 100)
+            if new_sl > leg.current_sl:
+                leg.current_sl = new_sl
+                logger.info(f"📈 {leg_name} trailing SL updated to {leg.current_sl:.2f} (LTP: {current_price:.2f})")
+
+        # 2. CHECK STOP LOSS BREACH
         if current_price <= leg.current_sl:
             logger.warning(f"⚠️  {leg_name} SL breached at {current_price:.2f}")
             self.exit_position(leg, current_price, "SL_BREACH")
             return
         
-        management_type = leg_config.get('management_type', 'fixed')
-        
-        # ===== ESCALATING PROFIT MANAGEMENT =====
-        if management_type == 'escalating_profit':
-            self._manage_escalating_profit(leg, leg_config, leg_name, current_price, pnl_pct)
-        
-        # ===== DYNAMIC SL MANAGEMENT =====
-        elif management_type == 'dynamic_sl':
-            self._manage_dynamic_sl(leg, leg_config, leg_name, current_price, pnl_pct)
-        
-        # ===== FIXED MANAGEMENT =====
-        else:  # fixed
-            self._manage_fixed(leg, leg_config, leg_name, current_price, pnl_pct)
-    
-    def _manage_escalating_profit(self, leg: LegPosition, leg_config: Dict,
-                                   leg_name: str, current_price: float, pnl_pct: float):
-        """Handle escalating profit management logic"""
-        profit_increase_step = leg_config.get('profit_increase_step', 1.0)
-        profit_step_threshold = leg_config.get('profit_step_threshold', 2.0)
-        
-        # Update lock profit based on profit level
-        if pnl_pct >= leg.lock_profit_pct and pnl_pct >= leg.profit_level_for_lock_increase:
-            leg.lock_profit_pct += profit_increase_step
-            leg.profit_level_for_lock_increase += profit_step_threshold
-            logger.info(f"🔒 {leg_name} lock profit increased to {leg.lock_profit_pct:.2f}%")
-        
-        # Check profit target exit
-        if pnl_pct >= leg.lock_profit_pct and pnl_pct >= 2.0:  # Minimum 2% before lock triggers
-            logger.info(f"✅ {leg_name} profit target reached: {pnl_pct:.2f}%")
-            self.exit_position(leg, current_price, "PROFIT_TARGET")
-    
-    def _manage_dynamic_sl(self, leg: LegPosition, leg_config: Dict,
-                           leg_name: str, current_price: float, pnl_pct: float):
-        """Handle dynamic SL management logic"""
-        dynamic_sl_decrease = leg_config.get('dynamic_sl_decrease', 1.0)
-        initial_sl_pct = leg_config.get('initial_sl_pct', 7.0)
-        
-        # SL tightens as profit increases
-        if pnl_pct > 0:
-            # New SL = Entry * (1 - (InitialSL - CurrentProfit) / 100)
-            new_sl = leg.entry_price * (1 - (initial_sl_pct - pnl_pct * dynamic_sl_decrease) / 100)
-            if new_sl > leg.current_sl:
-                leg.current_sl = new_sl
-                logger.info(f"📈 {leg_name} SL updated to {leg.current_sl:.2f} (PnL: {pnl_pct:.2f}%)")
-        
-        # Check auto-close at profit target
+        # 3. UPDATE ESCALATING PROFIT LOCK (if configured)
+        profit_lock_step = leg_config.get('profit_lock_step')
+        profit_step_threshold = leg_config.get('profit_step_threshold')
+
+        if profit_lock_step and profit_step_threshold:
+            # Escalate profit lock when profit crosses thresholds
+            if pnl_pct >= leg.lock_profit_pct and pnl_pct >= leg.profit_level_for_lock_increase:
+                leg.lock_profit_pct += profit_lock_step
+                leg.profit_level_for_lock_increase += profit_step_threshold
+                logger.info(f"🔒 {leg_name} lock profit escalated to {leg.lock_profit_pct:.2f}%")
+
+        # 4. CHECK AUTO-CLOSE AT PROFIT TARGET
         auto_close_pct = leg_config.get('auto_close_profit_pct')
         if auto_close_pct and pnl_pct >= auto_close_pct:
             logger.info(f"✅ {leg_name} auto-close at {auto_close_pct}% profit: {pnl_pct:.2f}%")
             self.exit_position(leg, current_price, f"AUTO_CLOSE_{auto_close_pct}PCT")
-    
-    def _manage_fixed(self, leg: LegPosition, leg_config: Dict,
-                      leg_name: str, current_price: float, pnl_pct: float):
-        """Handle fixed SL and target management"""
-        lock_profit_pct = leg_config.get('lock_profit_pct', 5.0)
-        if pnl_pct >= lock_profit_pct:
-            logger.info(f"✅ {leg_name} profit target reached: {pnl_pct:.2f}%")
-            self.exit_position(leg, current_price, "PROFIT_TARGET")
-    
+            return
+
+        # 5. CHECK PROFIT LOCK TARGET
+        if pnl_pct >= leg.lock_profit_pct:
+            logger.info(f"✅ {leg_name} profit lock reached: {pnl_pct:.2f}% (target: {leg.lock_profit_pct:.2f}%)")
+            self.exit_position(leg, current_price, "PROFIT_LOCK")
+
     def exit_position(self, leg: LegPosition, exit_price: float, reason: str) -> None:
         """
         Exit a position

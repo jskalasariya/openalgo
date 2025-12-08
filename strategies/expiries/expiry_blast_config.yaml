@@ -21,7 +21,7 @@ strategy:
   timezone: "Asia/Kolkata"
   
   # Only run on expiry day (True/False)
-  run_only_on_expiry_day: true
+  run_only_on_expiry_day: false
   
   # TEST MODE: Set to true to simulate all strategy logic WITHOUT placing actual orders
   # Perfect for backtesting over multiple expiries before going live

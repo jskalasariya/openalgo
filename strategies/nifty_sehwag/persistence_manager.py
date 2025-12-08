@@ -7,11 +7,11 @@ Includes crash detection and recovery capabilities.
 
 import logging
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Dict, List
 import uuid
 
 from database.nifty_sehwag_db import (
-    create_session, update_session_status, get_session,
+    create_session, update_session_status,
     log_position, update_position_status,
     log_order, update_order_status,
     log_event, db_session, NiftySehwagSession, NiftySehwagPosition
@@ -88,20 +88,21 @@ class NiftySehwagPersistence:
     
     def log_leg_entry(self, leg_num: int, leg_name: str, symbol: str, entry_price: float,
                       quantity: int, option_type: str, strike: float, initial_sl: float,
-                      lock_profit_pct: float):
+                      atm_strike: float = None):
         """Log leg entry"""
+        # Use atm_strike or strike as fallback
+        atm_strike_value = int(atm_strike) if atm_strike else int(strike)
+
         position_id = log_position(
             session_id=self.session_id,
-            leg_num=leg_num,
-            leg_name=leg_name,
+            leg_number=leg_num,
             symbol=symbol,
+            atm_strike=atm_strike_value,
+            strike=int(strike),
+            option_type=option_type,
             entry_price=entry_price,
             quantity=quantity,
-            option_type=option_type,
-            strike=strike,
-            initial_sl=initial_sl,
-            lock_profit_pct=lock_profit_pct,
-            status='ACTIVE'
+            initial_sl=initial_sl
         )
         
         if position_id:
@@ -111,17 +112,16 @@ class NiftySehwagPersistence:
         return position_id
     
     def log_order(self, leg_num: int, order_type: str, symbol: str, quantity: int,
-                  price: float, order_id: str = None):
+                  price: float, side: str = "BUY", notes: str = None):
         """Log order placement"""
         return log_order(
             session_id=self.session_id,
-            leg_num=leg_num,
             order_type=order_type,
             symbol=symbol,
+            side=side,
             quantity=quantity,
             price=price,
-            order_id=order_id,
-            status='PENDING'
+            notes=notes or f"Leg {leg_num} {order_type}"
         )
     
     def update_order_status(self, order_db_id: int, status: str, executed_price: float = None):
@@ -146,6 +146,71 @@ class NiftySehwagPersistence:
             except Exception as e:
                 logger.error(f"Error updating position: {e}")
     
+    def record_leg_entry(self, leg_num: int, leg_name: str, symbol: str,
+                        entry_price: float, quantity: int, initial_sl: float):
+        """
+        Convenience wrapper for recording leg entry (simplified version)
+
+        Args:
+            leg_num: Leg number
+            leg_name: Leg name
+            symbol: Option symbol
+            entry_price: Entry price
+            quantity: Quantity
+            initial_sl: Initial stop loss
+        """
+        # Extract option type and strike from symbol (e.g., NIFTY24DEC20500CE)
+        option_type = "CE" if "CE" in symbol else "PE"
+
+        # Try to extract strike from symbol
+        try:
+            # Find the position of CE/PE in symbol
+            pos = symbol.find(option_type)
+            # Extract numbers before CE/PE
+            strike_str = symbol[:pos]
+            # Get last 5 digits as strike (e.g., 20500)
+            strike = float(strike_str[-5:])
+        except:
+            strike = 0.0
+
+        return self.log_leg_entry(
+            leg_num=leg_num,
+            leg_name=leg_name,
+            symbol=symbol,
+            entry_price=entry_price,
+            quantity=quantity,
+            option_type=option_type,
+            strike=strike,
+            initial_sl=initial_sl,
+            atm_strike=strike  # Use same as strike for now
+        )
+
+    def record_leg_exit(self, leg_num: int, exit_price: float, reason: str):
+        """
+        Convenience wrapper for recording leg exit
+
+        Args:
+            leg_num: Leg number
+            exit_price: Exit price
+            reason: Exit reason
+        """
+        position_id = self.leg_positions.get(leg_num)
+        if position_id:
+            update_position_status(
+                position_id=position_id,
+                status=reason,
+                exit_price=exit_price
+            )
+            self.log_event(
+                "EXIT_EXECUTED",
+                f"Leg {leg_num} exited: {reason}",
+                metadata={
+                    'leg_num': leg_num,
+                    'exit_price': exit_price,
+                    'reason': reason
+                }
+            )
+
     def log_sl_update(self, leg_num: int, old_sl: float, new_sl: float):
         """Log stop loss update"""
         self.log_event(
@@ -178,8 +243,8 @@ class NiftySehwagPersistence:
                 position_id=position_id,
                 status=exit_reason,
                 exit_price=exit_price,
-                pnl=pnl,
-                pnl_pct=pnl_pct
+                realized_pnl=pnl,
+                pnl_percentage=pnl_pct
             )
             
             self.log_event(

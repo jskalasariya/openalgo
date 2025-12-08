@@ -38,68 +38,107 @@ class MarketDataManager:
     def get_quote(self, symbol: str, exchange: str = None, 
                   instrument_type: str = 'options') -> Optional[Dict]:
         """
-        Get current quote for a symbol
-        
+        Get current quote for a symbol (expiry_blast style - simple and direct)
+
         Args:
             symbol: Symbol to fetch
             exchange: Exchange (defaults to config)
             instrument_type: Instrument type
-            
+
         Returns:
             Quote data dict or None
         """
+        # Try WebSocket first if enabled and connected
+        if self.use_websocket and self.websocket_client and self.websocket_client.is_connected():
+            ws_price = self._get_price_from_websocket(symbol)
+            if ws_price:
+                logger.debug(f"WebSocket LTP for {symbol}: {ws_price}")
+                return {'ltp': ws_price}
+
+        # Fallback to REST API (expiry_blast approach - simple, no retries)
+        exchange = exchange or self.config.get('option_exchange', 'NFO')
+
         try:
-            # Try WebSocket first if enabled
-            if self.use_websocket and self.websocket_client:
-                ws_price = self._get_price_from_websocket(symbol)
-                if ws_price:
-                    logger.debug(f"WebSocket LTP for {symbol}: {ws_price}")
-                    return {'ltp': ws_price}
-            
-            # Fallback to REST API
-            exchange = exchange or self.config.get('option_exchange', 'NFO')
-            resp = self.client.quotes(
+            q = self.client.quotes(
                 symbol=symbol,
                 exchange=exchange
             )
-            
-            # quotes() returns format: {'data': {'ltp': ..., ...}}
-            if isinstance(resp, dict) and 'data' in resp:
-                return resp.get('data')
-            
-            logger.error(f"Failed to get quote for {symbol}: {resp}")
+
+            # Debug: Log the response structure
+            logger.debug(f"Quote API response for {symbol}: {q}")
+
+            # Handle different response formats (exactly like expiry_blast)
+            if isinstance(q, dict):
+                # Try different possible structures
+                if 'data' in q and isinstance(q['data'], dict) and 'ltp' in q['data']:
+                    return q['data']
+                elif 'ltp' in q:
+                    return q
+                elif 'data' in q and isinstance(q['data'], list) and len(q['data']) > 0:
+                    return q['data'][0]
+                else:
+                    logger.error(f"✗ Unexpected quote response format for {symbol}: {q}")
+                    return None
+            else:
+                logger.error(f"✗ Quote response is not a dict for {symbol}: {type(q)}")
+                return None
+
+        except KeyError as e:
+            logger.error(f"✗ KeyError fetching quote for {symbol}: Missing key {e}")
+            logger.error(f"   Response structure: {q if 'q' in locals() else 'N/A'}")
             return None
-                
         except Exception as e:
-            logger.error(f"Error getting quote for {symbol}: {e}")
+            logger.error(f"✗ Error fetching quote for {symbol}: {e}")
             return None
-    
+
     def _get_price_from_websocket(self, symbol: str) -> Optional[float]:
         """Get price from WebSocket client"""
         if not self.websocket_client:
             return None
         
         try:
-            price = self.websocket_client.get_ltp(symbol)
+            # Correct method name is get_last_price(), not get_ltp()
+            price = self.websocket_client.get_last_price(symbol)
             return float(price) if price else None
         except Exception as e:
-            logger.debug(f"WebSocket price fetch failed for {symbol}: {e}")
+            logger.warning(f"WebSocket price fetch failed for {symbol}: {e}")
             return None
     
     def get_underlying_price(self) -> Optional[float]:
-        """Get current underlying price"""
+        """Get current underlying price with multiple format support"""
         try:
-            # client.quotes() returns dict with 'data' containing quote info
+            # Try WebSocket first if enabled and connected
+            if self.use_websocket and self.websocket_client and self.websocket_client.is_connected():
+                ws_price = self._get_price_from_websocket(self.underlying)
+                if ws_price:
+                    logger.debug(f"WebSocket LTP for {self.underlying}: {ws_price}")
+                    return ws_price
+
+            # Fallback to REST API
             quote = self.client.quotes(
                 symbol=self.underlying,
                 exchange=self.underlying_exchange
             )
             
-            # quotes() returns format: {'data': {'ltp': ..., ...}}
-            if isinstance(quote, dict) and 'data' in quote:
-                return float(quote['data'].get('ltp', 0))
-            
-            logger.warning(f"Could not extract LTP from quote response: {quote}")
+            # Handle different response formats (like expiry_blast)
+            if isinstance(quote, dict):
+                # Format 1: {'data': {'ltp': ...}}
+                if 'data' in quote and isinstance(quote['data'], dict):
+                    ltp = quote['data'].get('ltp')
+                    if ltp:
+                        return float(ltp)
+
+                # Format 2: {'ltp': ...} (direct)
+                elif 'ltp' in quote:
+                    return float(quote['ltp'])
+
+                # Format 3: {'data': [{'ltp': ...}]} (list)
+                elif 'data' in quote and isinstance(quote['data'], list) and len(quote['data']) > 0:
+                    ltp = quote['data'][0].get('ltp')
+                    if ltp:
+                        return float(ltp)
+
+            logger.warning(f"Could not extract LTP from underlying quote response: {quote}")
             return None
             
         except Exception as e:
@@ -118,7 +157,7 @@ class MarketDataManager:
             DataFrame with OHLC data or None if no data (holiday/weekend)
         """
         try:
-            logger.debug(f"Requesting history for {self.underlying} ({self.underlying_exchange}) "
+            logger.info(f"Requesting history for {self.underlying} ({self.underlying_exchange}) "
                         f"from {from_date} to {to_date}, interval: {self.candle_interval}")
             
             df = self.client.history(

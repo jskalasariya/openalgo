@@ -17,6 +17,7 @@ Thumbs.db
 .python-version
 config.ini
 .venvv
+.github
 
 #DB Files, CSV Files and Log/Tmp Files
 
