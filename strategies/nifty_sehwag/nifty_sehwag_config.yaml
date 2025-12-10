@@ -42,7 +42,7 @@ schedule:
 
 legs:
   # Leg 1: ITM3, 1 lot, no trailing SL
-  - name: "Leg 1"
+  - name: "profit lock with trail"
     enabled: true
     entry_time: "09:15:10"
     exit_time: "13:30:00"
@@ -63,10 +63,10 @@ legs:
     wait_trade_timeout_seconds: 300
 
   # Leg 2: ATM, 2 lots, with trailing SL
-  - name: "Leg 2"
-    enabled: false
+  - name: "profit lock with auto close"
+    enabled: true
     entry_time: "09:15:10"
-    exit_time: "10:30:00"
+    exit_time: "11:30:00"
     strike_type: "ITM3"
     lot_multiplier: 1
 
@@ -84,10 +84,10 @@ legs:
     wait_trade_timeout_seconds: 300
 
   # Leg 3: OTM2, 3 lots, exits at strategy end time
-  - name: "Leg 3"
+  - name: "trailing sl only"
     enabled: true
     entry_time: "09:16:00"
-    exit_time: "10:30:00"
+    exit_time: "11:30:00"
     strike_type: "ITM4"
     lot_multiplier: 1
 
@@ -107,7 +107,7 @@ legs:
 
 # Order Configuration
 orders:
-  auto_place_orders: true           # false = simulation, true = live trading
+  auto_place_orders: false           # false = simulation, true = live trading
   price_type: "MARKET"
   product: "NRML"
   entry_action: "BUY"

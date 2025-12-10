@@ -93,6 +93,28 @@ class OrderManager:
             logger.error(f"✗ Error placing order: {e}")
             return None
     
+    def check_order_status(self, order_id: str) -> Optional[str]:
+        """
+        Check order status (simple status string)
+
+        Args:
+            order_id: Order ID to check
+
+        Returns:
+            Order status string ('COMPLETE', 'PENDING', 'REJECTED', etc.) or None
+        """
+        order_info = self.get_order_status(order_id)
+        if order_info:
+            # Try multiple field names for status
+            status = (
+                order_info.get('order_status') or
+                order_info.get('orderstatus') or
+                order_info.get('status') or
+                order_info.get('Status')
+            )
+            return status
+        return None
+
     def get_order_status(self, order_id: str) -> Optional[Dict]:
         """
         Get status of an order

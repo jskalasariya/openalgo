@@ -22,15 +22,14 @@ from .market_data import MarketDataManager
 from .order_manager import OrderManager
 from .position_manager import PositionManager
 from .persistence_manager import NiftySehwagPersistence
-from .logging_manager import get_leg_logger
+from .logging_manager import get_leg_logger, close_leg_logger
 
 logger = logging.getLogger(__name__)
 
 
 def is_market_open(tz=pytz.timezone('Asia/Kolkata')) -> bool:
     """Check if market is currently open"""
-    # TODO Jaysukh
-    return True
+
     now = datetime.now(tz)
     current_time = now.time()
 
@@ -73,7 +72,9 @@ class LegState:
         self.profit_target_order_id: Optional[str] = None  # Track profit target order on broker
 
         # Risk management - leg-level takes precedence over strategy-level
-        self.initial_sl_pct: float = config.get('initial_sl_pct', strategy_defaults.get('initial_sl_pct', 7.0))
+        # CRITICAL FIX: Remove hardcoded 7.0 default to prevent config cascade
+        initial_sl = config.get('initial_sl_pct', strategy_defaults.get('initial_sl_pct'))
+        self.initial_sl_pct: float = initial_sl if initial_sl is not None else 7.0  # Only use 7.0 as last resort
         self.current_sl: Optional[float] = None
         self.highest_price: Optional[float] = None
 
@@ -139,10 +140,12 @@ class NiftySehwagStrategy:
         self.end_minute = int(config.get('schedule', {}).get('end_minute', 0))
 
         # SL Management parameters (strategy-level defaults, leg-level can override)
-        self.initial_sl_pct = config.get('strategy', {}).get('initial_sl_pct', 7.0)
-        self.lock_profit_pct = config.get('strategy', {}).get('lock_profit_pct', 2.0)
-        self.profit_lock_buffer = config.get('strategy', {}).get('profit_lock_buffer', 0.5)
-        self.auto_close_profit_pct = config.get('strategy', {}).get('auto_close_profit_pct', None)
+        # CRITICAL FIX: Remove hardcoded defaults to prevent cascade to legs
+        # Only use what's explicitly in config file
+        self.initial_sl_pct = config.get('strategy', {}).get('initial_sl_pct')
+        self.lock_profit_pct = config.get('strategy', {}).get('lock_profit_pct')
+        self.profit_lock_buffer = config.get('strategy', {}).get('profit_lock_buffer')
+        self.auto_close_profit_pct = config.get('strategy', {}).get('auto_close_profit_pct')
 
         # Initialize components
         self.market_data = MarketDataManager(
@@ -449,12 +452,25 @@ class NiftySehwagStrategy:
 
         except Exception as e:
             leg_logger.error(f"Thread error: {e}")
+            # Log full traceback BEFORE closing logger
             import traceback
-            leg_logger.error(traceback.format_exc())
+            leg_logger.error(f"Full traceback:\n{traceback.format_exc()}")
+        finally:
+            # Close the leg logger when thread completes
+            close_leg_logger(leg_state.leg_num)
 
     def _print_leg_summary(self, leg_state: LegState, leg_logger):
         """Print leg configuration summary"""
-        def get_param(key, default=None):
+        def get_leg_param(key, default=None):
+            """Get parameter from leg config only (for display purposes)"""
+            val = leg_state.config.get(key, default)
+            # Treat string 'null' as None
+            if isinstance(val, str) and val.lower() == 'null':
+                return None
+            return val
+
+        def get_effective_param(key, default=None):
+            """Get effective parameter with fallback to strategy defaults (for Wait & Trade display)"""
             return leg_state.config.get(key, leg_state.strategy_defaults.get(key, default))
 
         leg_logger.info("=" * 80)
@@ -468,8 +484,8 @@ class NiftySehwagStrategy:
         leg_logger.info("STOP LOSS MANAGEMENT:")
         leg_logger.info(f"  Initial SL:           {leg_state.initial_sl_pct}% below entry")
 
-        sl_trail_trigger = get_param('sl_trail_trigger_pct')
-        sl_trail_move = get_param('sl_trail_move_pct')
+        sl_trail_trigger = get_leg_param('sl_trail_trigger_pct')
+        sl_trail_move = get_leg_param('sl_trail_move_pct')
         if sl_trail_trigger and sl_trail_move:
             leg_logger.info(f"  Trailing SL:          Every {sl_trail_trigger}% profit gain → Move SL up by {sl_trail_move}%")
         else:
@@ -478,18 +494,25 @@ class NiftySehwagStrategy:
         leg_logger.info("")
         leg_logger.info("PROFIT MANAGEMENT:")
 
-        # Check which mode is configured
-        first_lock = get_param('first_lock_pct')
-        trail_trigger = get_param('trail_trigger_pct')
-        trail_move = get_param('trail_move_pct')
-        lock_profit = get_param('lock_profit_pct')
-        profit_step = get_param('profit_lock_step')
-        profit_threshold = get_param('profit_step_threshold')
+        # Check which mode is configured (use leg-specific params only)
+        first_lock = get_leg_param('first_lock_pct')
+        trail_trigger = get_leg_param('trail_trigger_pct')
+        trail_move = get_leg_param('trail_move_pct')
+        lock_profit = get_leg_param('lock_profit_pct')
+        lock_trigger = get_leg_param('lock_trigger_pct')
+        profit_step = get_leg_param('profit_lock_step')
+        profit_threshold = get_leg_param('profit_step_threshold')
 
-        if first_lock and trail_trigger and trail_move:
-            # Mode 2: Lock once then trail
+        if lock_trigger and first_lock and trail_trigger and trail_move:
+            # Mode 2: Two-stage profit lock (trigger → lock → trail)
+            leg_logger.info(f"  Mode:                 Two-Stage Profit Lock")
+            leg_logger.info(f"  Lock Trigger:         {lock_trigger}% profit → activate lock")
+            leg_logger.info(f"  First Lock:           Exit at {first_lock}% profit (when triggered)")
+            leg_logger.info(f"  Then Trail:           Every {trail_trigger}% profit gain → Trail exit by {trail_move}%")
+        elif first_lock and trail_trigger and trail_move:
+            # Mode 2b: Lock immediately then trail
             leg_logger.info(f"  Mode:                 Lock Once Then Trail")
-            leg_logger.info(f"  First Lock:           Exit at {first_lock}% profit (locks once)")
+            leg_logger.info(f"  First Lock:           Exit at {first_lock}% profit (locks immediately)")
             leg_logger.info(f"  Then Trail:           Every {trail_trigger}% profit gain → Trail exit by {trail_move}%")
         elif profit_step and profit_threshold and lock_profit:
             # Mode 3: Progressive escalating
@@ -501,17 +524,59 @@ class NiftySehwagStrategy:
             leg_logger.info(f"  Mode:                 Simple Profit Lock")
             leg_logger.info(f"  Target:               Exit at {lock_profit}% profit")
         else:
-            leg_logger.info(f"  Mode:                 None configured")
+            leg_logger.info(f"  Mode:                 None configured (only SL)")
 
-        auto_close = get_param('auto_close_profit_pct')
+        auto_close = get_leg_param('auto_close_profit_pct')
         if auto_close:
             leg_logger.info(f"  Auto Close:           {auto_close}% (overrides all other exits)")
 
         leg_logger.info("")
         leg_logger.info("ENTRY CONFIRMATION:")
-        wait_threshold = get_param('wait_trade_threshold_pct', self.wait_trade_threshold_pct)
-        wait_timeout = get_param('wait_trade_timeout_seconds', self.wait_trade_timeout_seconds)
+        wait_threshold = get_effective_param('wait_trade_threshold_pct', self.wait_trade_threshold_pct)
+        wait_timeout = get_effective_param('wait_trade_timeout_seconds', self.wait_trade_timeout_seconds)
         leg_logger.info(f"  Wait & Trade:         {wait_threshold}% move required, {wait_timeout}s timeout")
+        leg_logger.info("=" * 80)
+
+        # ADD CONFIG VALIDATION - Show effective values after resolution
+        leg_logger.info("")
+        leg_logger.info("=" * 80)
+        leg_logger.info("🔍 EFFECTIVE CONFIG (What will ACTUALLY be used):")
+        leg_logger.info("=" * 80)
+
+        # Helper to check effective value with proper null handling
+        def show_effective_value(param_name, display_name):
+            """Show effective value and its source"""
+            leg_val = leg_state.config.get(param_name)
+            strategy_val = leg_state.strategy_defaults.get(param_name) if leg_state.strategy_defaults else None
+
+            # Check if explicitly disabled in leg config
+            is_leg_null = leg_val is None or (isinstance(leg_val, str) and leg_val.lower() in ('null', 'none', ''))
+            is_strategy_null = strategy_val is None or (isinstance(strategy_val, str) and strategy_val.lower() in ('null', 'none', ''))
+
+            if param_name in leg_state.config and not is_leg_null:
+                leg_logger.info(f"  {display_name:30s} = {leg_val:>8} (LEG config)")
+            elif param_name in leg_state.config and is_leg_null:
+                leg_logger.info(f"  {display_name:30s} = {'None':>8} (DISABLED in leg config)")
+            elif strategy_val is not None and not is_strategy_null:
+                leg_logger.info(f"  {display_name:30s} = {strategy_val:>8} (strategy default)")
+            else:
+                leg_logger.info(f"  {display_name:30s} = {'None':>8} (not configured)")
+
+        # Show all relevant parameters
+        show_effective_value('first_lock_pct', 'first_lock_pct')
+        show_effective_value('trail_trigger_pct', 'trail_trigger_pct')
+        show_effective_value('trail_move_pct', 'trail_move_pct')
+        show_effective_value('lock_trigger_pct', 'lock_trigger_pct')
+        show_effective_value('lock_profit_pct', 'lock_profit_pct')
+        show_effective_value('profit_lock_step', 'profit_lock_step')
+        show_effective_value('profit_step_threshold', 'profit_step_threshold')
+        show_effective_value('auto_close_profit_pct', 'auto_close_profit_pct')
+        show_effective_value('sl_trail_trigger_pct', 'sl_trail_trigger_pct')
+        show_effective_value('sl_trail_move_pct', 'sl_trail_move_pct')
+
+        leg_logger.info("=" * 80)
+        leg_logger.info("")
+        leg_logger.info("⚠️  CRITICAL: Params with 'DISABLED in leg config' will NOT use strategy defaults!")
         leg_logger.info("=" * 80)
 
     def _wait_for_time(self, target_time: datetime, leg_logger):
@@ -927,6 +992,46 @@ class NiftySehwagStrategy:
         # Check SL breach
         if current_price <= leg_state.current_sl:
             leg_logger.warning(f"⚠️  SL breached at ₹{current_price:.2f}")
+
+            # CRITICAL FIX: Check if SL order on broker already executed
+            # If SL order executed, position is already closed - don't place duplicate sell order!
+            if leg_state.sl_order_id:
+                # Check if SL order still exists (pending) or already executed/filled
+                try:
+                    order_status = self.order_manager.check_order_status(leg_state.sl_order_id)
+
+                    if order_status and order_status.lower() in ['complete', 'filled', 'executed']:
+                        # SL order already executed on broker - position is closed
+                        leg_logger.info(f"✅ SL order {leg_state.sl_order_id} already executed on broker")
+                        leg_logger.info(f"   Position closed by broker's SL, no manual exit needed")
+
+                        # Mark position as closed without placing another sell order
+                        with self.state_lock:
+                            leg_state._exiting = True
+                            leg_state.is_active = False
+                            leg_state.sl_order_id = None
+                            leg_state.exit_price = current_price
+                            leg_state.exit_reason = "SL_EXECUTED_ON_BROKER"
+
+                        # Log to database
+                        if self.persistence:
+                            pnl, pnl_pct = leg_state.calculate_pnl(current_price)
+                            self.persistence.record_leg_exit(
+                                leg_state.leg_num,
+                                current_price,
+                                pnl,
+                                pnl_pct,
+                                "SL_EXECUTED_ON_BROKER"
+                            )
+
+                        leg_logger.info(f"✅ Position marked as closed (SL executed on broker)")
+                        return
+
+                except Exception as e:
+                    leg_logger.warning(f"⚠️ Could not check SL order status: {e}")
+                    leg_logger.warning(f"   Will attempt manual exit (may fail if already closed)")
+
+            # SL order not executed yet or doesn't exist - proceed with manual exit
             self._exit_leg_position(leg_state, current_price, "SL_BREACH", leg_logger)
             return
 
@@ -973,8 +1078,8 @@ class NiftySehwagStrategy:
                     except (ValueError, TypeError):
                         pass
 
-            # Add highest price reached
-            if leg_state.highest_price and leg_state.highest_price > leg_state.entry_price:
+            # Add highest price reached (always show when position is active)
+            if leg_state.highest_price:
                 log_parts.append(f"Peak: ₹{leg_state.highest_price:.2f}")
 
             leg_logger.info(" | ".join(log_parts))
@@ -1005,9 +1110,45 @@ class NiftySehwagStrategy:
                     return None
             return None
 
-        # Get config with leg-level priority over strategy defaults
-        def get_param(key, default=None):
-            return leg_state.config.get(key, leg_state.strategy_defaults.get(key, default))
+        # FIXED: Get config with proper null handling to prevent cascade bugs
+        def get_param(key, default=None, allow_strategy_fallback=True):
+            """
+            Get parameter value with proper None/null handling
+
+            Args:
+                key: Parameter key to lookup
+                default: Default value if not found
+                allow_strategy_fallback: If False, explicit None in leg config blocks strategy fallback
+
+            Returns:
+                Parameter value or None
+
+            Behavior:
+                - If key exists in leg config with non-null value → use it
+                - If key exists in leg config with null/None → return None (do NOT fall back)
+                - If key NOT in leg config and allow_strategy_fallback → check strategy defaults
+                - Otherwise → return default
+            """
+            # Check if key exists in leg config
+            if key in leg_state.config:
+                value = leg_state.config[key]
+                # Check if explicitly disabled (None or "null" string from YAML)
+                if value is None or (isinstance(value, str) and value.lower() in ('null', 'none', '')):
+                    # Explicitly disabled - do NOT fall back to strategy defaults
+                    return None
+                # Has a real value
+                return value
+
+            # Not in leg config - check strategy defaults if allowed
+            if allow_strategy_fallback and key in leg_state.strategy_defaults:
+                value = leg_state.strategy_defaults[key]
+                # Apply same null check for strategy defaults
+                if value is None or (isinstance(value, str) and value.lower() in ('null', 'none', '')):
+                    return None
+                return value
+
+            # Not found anywhere
+            return default
 
         # ===== 1. TRAILING STOP LOSS MANAGEMENT =====
         # Trail SL when profit moves X%, then move SL by Y%
@@ -1066,23 +1207,26 @@ class NiftySehwagStrategy:
                         self.persistence.log_sl_update(leg_state.leg_num, old_sl, new_sl_price)
 
         # ===== 2. CHECK AUTO-CLOSE (HIGHEST PRIORITY) =====
-        auto_close_pct = safe_float(get_param('auto_close_profit_pct'))
-        if auto_close_pct and pnl_pct >= auto_close_pct:
+        auto_close_pct = safe_float(get_param('auto_close_profit_pct', allow_strategy_fallback=False))
+        if auto_close_pct is not None and pnl_pct >= auto_close_pct:
             leg_logger.info(f"✅ Auto-close at {auto_close_pct}% profit: {pnl_pct:.2f}%")
             self._exit_leg_position(leg_state, current_price, f"AUTO_CLOSE_{auto_close_pct}PCT", leg_logger)
             return
 
         # ===== 3. PROFIT MANAGEMENT - DETERMINE MODE =====
-        first_lock_pct = safe_float(get_param('first_lock_pct'))
-        trail_trigger_pct = safe_float(get_param('trail_trigger_pct'))
-        trail_move_pct = safe_float(get_param('trail_move_pct'))
-        lock_profit_pct = safe_float(get_param('lock_profit_pct'))
-        profit_lock_step = safe_float(get_param('profit_lock_step'))
-        profit_step_threshold = safe_float(get_param('profit_step_threshold'))
+        # CRITICAL FIX: Disable strategy fallback for mode-specific params
+        # This prevents Leg 3 (null config) from inheriting Leg 1's profit lock config
+        first_lock_pct = safe_float(get_param('first_lock_pct', allow_strategy_fallback=False))
+        trail_trigger_pct = safe_float(get_param('trail_trigger_pct', allow_strategy_fallback=False))
+        trail_move_pct = safe_float(get_param('trail_move_pct', allow_strategy_fallback=False))
+        lock_profit_pct = safe_float(get_param('lock_profit_pct', allow_strategy_fallback=False))
+        profit_lock_step = safe_float(get_param('profit_lock_step', allow_strategy_fallback=False))
+        profit_step_threshold = safe_float(get_param('profit_step_threshold', allow_strategy_fallback=False))
 
         # MODE 2: Lock Once Then Trail (RECOMMENDED)
         # New behavior: Trigger lock at X% profit, set exit at Y%, then trail
-        if first_lock_pct and trail_trigger_pct and trail_move_pct:
+        # CRITICAL: These params should NOT fallback to strategy defaults to avoid leg config pollution
+        if first_lock_pct is not None and trail_trigger_pct is not None and trail_move_pct is not None:
             # Get lock trigger (profit % at which to activate lock)
             # If not specified, defaults to first_lock_pct (backward compatible)
             lock_trigger_pct = safe_float(get_param('lock_trigger_pct', first_lock_pct))
@@ -1216,7 +1360,7 @@ class NiftySehwagStrategy:
                         )
 
         # MODE 3: Progressive Escalating Lock (OLD BEHAVIOR)
-        elif profit_lock_step and profit_step_threshold and lock_profit_pct:
+        elif profit_lock_step is not None and profit_step_threshold is not None and lock_profit_pct is not None:
             # Initialize escalation tracking
             if not hasattr(leg_state, 'profit_level_for_lock_increase'):
                 leg_state.profit_level_for_lock_increase = lock_profit_pct + profit_step_threshold
@@ -1234,7 +1378,7 @@ class NiftySehwagStrategy:
                 self._exit_leg_position(leg_state, current_price, "PROFIT_LOCK", leg_logger)
 
         # MODE 1: Simple Profit Lock (DEFAULT)
-        elif lock_profit_pct:
+        elif lock_profit_pct is not None:
             if pnl_pct >= lock_profit_pct:
                 leg_logger.info(f"✅ Profit lock reached: {pnl_pct:.2f}% (target: {lock_profit_pct:.2f}%)")
                 self._exit_leg_position(leg_state, current_price, "PROFIT_LOCK", leg_logger)

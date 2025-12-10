@@ -5,6 +5,7 @@ Handles price fetching, candle analysis, and entry condition detection.
 """
 
 import logging
+import time
 from typing import Dict, Optional, Tuple
 from datetime import datetime, timedelta
 import pandas as pd
@@ -55,41 +56,76 @@ class MarketDataManager:
                 logger.debug(f"WebSocket LTP for {symbol}: {ws_price}")
                 return {'ltp': ws_price}
 
-        # Fallback to REST API (expiry_blast approach - simple, no retries)
+        # Fallback to REST API with retry logic for transient errors
         exchange = exchange or self.config.get('option_exchange', 'NFO')
+        max_retries = 3
 
-        try:
-            q = self.client.quotes(
-                symbol=symbol,
-                exchange=exchange
-            )
+        for attempt in range(max_retries):
+            try:
+                q = self.client.quotes(
+                    symbol=symbol,
+                    exchange=exchange
+                )
 
-            # Debug: Log the response structure
-            logger.debug(f"Quote API response for {symbol}: {q}")
+                # Debug: Log the response structure
+                logger.debug(f"Quote API response for {symbol}: {q}")
 
-            # Handle different response formats (exactly like expiry_blast)
-            if isinstance(q, dict):
-                # Try different possible structures
-                if 'data' in q and isinstance(q['data'], dict) and 'ltp' in q['data']:
-                    return q['data']
-                elif 'ltp' in q:
-                    return q
-                elif 'data' in q and isinstance(q['data'], list) and len(q['data']) > 0:
-                    return q['data'][0]
+                # Check for error response first
+                if isinstance(q, dict) and q.get('status') == 'error':
+                    error_msg = q.get('message', 'Unknown error')
+
+                    # Check if it's a transient network error
+                    if 'WinError 10035' in error_msg or 'HTTP 500' in error_msg or 'timeout' in error_msg.lower():
+                        if attempt < max_retries - 1:
+                            wait_time = (attempt + 1) * 0.5
+                            logger.debug(f"Transient API error for {symbol} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            logger.warning(f"API error for {symbol} after {max_retries} attempts: {error_msg}")
+                            return None
+                    else:
+                        logger.error(f"API error for {symbol}: {error_msg}")
+                        return None
+
+                # Handle successful response formats
+                if isinstance(q, dict):
+                    # Try different possible structures
+                    if 'data' in q and isinstance(q['data'], dict) and 'ltp' in q['data']:
+                        return q['data']
+                    elif 'ltp' in q:
+                        return q
+                    elif 'data' in q and isinstance(q['data'], list) and len(q['data']) > 0:
+                        return q['data'][0]
+                    else:
+                        logger.error(f"✗ Unexpected quote response format for {symbol}: {q}")
+                        if attempt < max_retries - 1:
+                            time.sleep(0.5)
+                            continue
+                        return None
                 else:
-                    logger.error(f"✗ Unexpected quote response format for {symbol}: {q}")
+                    logger.error(f"✗ Quote response is not a dict for {symbol}: {type(q)}")
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5)
+                        continue
                     return None
-            else:
-                logger.error(f"✗ Quote response is not a dict for {symbol}: {type(q)}")
-                return None
 
-        except KeyError as e:
-            logger.error(f"✗ KeyError fetching quote for {symbol}: Missing key {e}")
-            logger.error(f"   Response structure: {q if 'q' in locals() else 'N/A'}")
-            return None
-        except Exception as e:
-            logger.error(f"✗ Error fetching quote for {symbol}: {e}")
-            return None
+            except KeyError as e:
+                logger.error(f"✗ KeyError fetching quote for {symbol}: Missing key {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(0.5)
+                    continue
+                return None
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.debug(f"Quote fetch failed for {symbol} (attempt {attempt + 1}/{max_retries}): {e}")
+                    time.sleep((attempt + 1) * 0.5)
+                    continue
+                else:
+                    logger.error(f"✗ Error fetching quote for {symbol} after {max_retries} attempts: {e}")
+                    return None
+
+        return None
 
     def _get_price_from_websocket(self, symbol: str) -> Optional[float]:
         """Get price from WebSocket client"""
@@ -104,8 +140,16 @@ class MarketDataManager:
             logger.warning(f"WebSocket price fetch failed for {symbol}: {e}")
             return None
     
-    def get_underlying_price(self) -> Optional[float]:
-        """Get current underlying price with multiple format support"""
+    def get_underlying_price(self, max_retries: int = 3) -> Optional[float]:
+        """
+        Get current underlying price with multiple format support and retry logic
+
+        Args:
+            max_retries: Maximum number of retry attempts for transient errors
+
+        Returns:
+            Current price or None if all attempts fail
+        """
         try:
             # Try WebSocket first if enabled and connected
             if self.use_websocket and self.websocket_client and self.websocket_client.is_connected():
@@ -114,35 +158,69 @@ class MarketDataManager:
                     logger.debug(f"WebSocket LTP for {self.underlying}: {ws_price}")
                     return ws_price
 
-            # Fallback to REST API
-            quote = self.client.quotes(
-                symbol=self.underlying,
-                exchange=self.underlying_exchange
-            )
-            
-            # Handle different response formats (like expiry_blast)
-            if isinstance(quote, dict):
-                # Format 1: {'data': {'ltp': ...}}
-                if 'data' in quote and isinstance(quote['data'], dict):
-                    ltp = quote['data'].get('ltp')
-                    if ltp:
-                        return float(ltp)
+            # Fallback to REST API with retry logic
+            for attempt in range(max_retries):
+                try:
+                    quote = self.client.quotes(
+                        symbol=self.underlying,
+                        exchange=self.underlying_exchange
+                    )
 
-                # Format 2: {'ltp': ...} (direct)
-                elif 'ltp' in quote:
-                    return float(quote['ltp'])
+                    # Check for error response first
+                    if isinstance(quote, dict) and quote.get('status') == 'error':
+                        error_msg = quote.get('message', 'Unknown error')
 
-                # Format 3: {'data': [{'ltp': ...}]} (list)
-                elif 'data' in quote and isinstance(quote['data'], list) and len(quote['data']) > 0:
-                    ltp = quote['data'][0].get('ltp')
-                    if ltp:
-                        return float(ltp)
+                        # Check if it's a transient network error
+                        if 'WinError 10035' in error_msg or 'HTTP 500' in error_msg or 'timeout' in error_msg.lower():
+                            if attempt < max_retries - 1:
+                                wait_time = (attempt + 1) * 0.5  # 0.5s, 1s, 1.5s
+                                logger.debug(f"Transient API error (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
+                                time.sleep(wait_time)
+                                continue
+                            else:
+                                logger.warning(f"API error after {max_retries} attempts: {error_msg}")
+                                return None
+                        else:
+                            # Non-transient error, don't retry
+                            logger.error(f"API error: {error_msg}")
+                            return None
 
-            logger.warning(f"Could not extract LTP from underlying quote response: {quote}")
+                    # Handle successful response formats
+                    if isinstance(quote, dict):
+                        # Format 1: {'data': {'ltp': ...}}
+                        if 'data' in quote and isinstance(quote['data'], dict):
+                            ltp = quote['data'].get('ltp')
+                            if ltp:
+                                return float(ltp)
+
+                        # Format 2: {'ltp': ...} (direct)
+                        elif 'ltp' in quote:
+                            return float(quote['ltp'])
+
+                        # Format 3: {'data': [{'ltp': ...}]} (list)
+                        elif 'data' in quote and isinstance(quote['data'], list) and len(quote['data']) > 0:
+                            ltp = quote['data'][0].get('ltp')
+                            if ltp:
+                                return float(ltp)
+
+                    logger.warning(f"Could not extract LTP from quote response (attempt {attempt + 1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5)
+                        continue
+                    return None
+
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        logger.debug(f"Quote fetch failed (attempt {attempt + 1}/{max_retries}): {e}")
+                        time.sleep((attempt + 1) * 0.5)
+                        continue
+                    else:
+                        raise
+
             return None
             
         except Exception as e:
-            logger.error(f"Error getting underlying price: {e}")
+            logger.error(f"Error getting underlying price after {max_retries} attempts: {e}")
             return None
     
     def get_candle_data(self, from_date: str, to_date: str) -> Optional[pd.DataFrame]:
