@@ -410,7 +410,7 @@ def create_position(session_id: str, leg_number: int, symbol: str, atm_strike: i
             atm_strike=atm_strike,
             itm_level=itm_level,
             entry_price=entry_price,
-            quantity=quantity,
+            entry_quantity=quantity,  # Database column is entry_quantity, not quantity
             sl_percentage=None,  # Can be updated later
             profit_target=None   # Can be updated later
         )

@@ -14,12 +14,12 @@ strategy:
   lot_size: 75                           # NIFTY: 75, BANKNIFTY: 15
   timezone: "Asia/Kolkata"
   
-  test_mode: true                        # true = simulation, false = live trading
+  test_mode: false                        # true = simulation, false = live trading
   allow_multiple_runs_per_day: true     # true = testing, false = production safety
   execution_mode: "parallel"             # "parallel" or "sequential"
 
   # Wait & Trade - default for all legs (can be overridden per leg)
-  wait_trade_threshold_pct: 3.0          # Price move % required before entry
+  wait_trade_threshold_pct: 1.0          # Price move % required before entry
   wait_trade_timeout_seconds: 300        # Max wait time (5 minutes)
 
   # Breakout analysis
@@ -29,7 +29,7 @@ strategy:
   # Performance tuning (sleep intervals in seconds)
   wait_trade_check_interval: 0.5         # How often to check price during Wait & Trade
   monitor_check_interval: 0.1            # How often to check position (with WebSocket)
-  monitor_check_interval_no_ws: 1.0      # How often to check position (without WebSocket)
+  monitor_check_interval_no_ws: 0.5      # How often to check position (without WebSocket)
   error_retry_interval: 1.0              # Wait time after error before retry
 
 # Strategy Scheduling
@@ -45,26 +45,26 @@ legs:
   - name: "Leg 1"
     enabled: true
     entry_time: "09:15:10"
-    exit_time: "10:30:00"
-    strike_type: "ITM2"                # ATM, ITM1-4, OTM1-4
+    exit_time: "13:30:00"
+    strike_type: "ITM3"                # ATM, ITM1-4, OTM1-4
     lot_multiplier: 1
 
     initial_sl_pct: 7.0                # Initial stop loss %
     sl_trail_trigger_pct: null         # Trailing SL: trigger % (null = disabled)
     sl_trail_move_pct: null            # Trailing SL: move %
 
-    lock_trigger_pct: 6.0             # Trigger lock at 10% profit
-    first_lock_pct: 2.0                # Set exit target at 2%
-    trail_trigger_pct: 1.0             # Trail exit every 2% profit
-    trail_move_pct: 1.0                # Trail exit by 1%
+    lock_trigger_pct: 6.0             # Trigger lock at 6% profit
+    first_lock_pct: 2.0                # Lock 2% profit initially
+    trail_trigger_pct: 2.0             # Every 2% profit increase → trail lock up
+    trail_move_pct: 1.0                # Move lock up by 2% (6%→2%, 8%→4%, 10%→6%)
     auto_close_profit_pct: "null"        # Auto-close at X% profit (null = disabled)
 
-    wait_trade_threshold_pct: 3.0      # Wait for 1% move before entry
+    wait_trade_threshold_pct: 2.5      # Wait for 1% move before entry
     wait_trade_timeout_seconds: 300
 
   # Leg 2: ATM, 2 lots, with trailing SL
   - name: "Leg 2"
-    enabled: true
+    enabled: false
     entry_time: "09:15:10"
     exit_time: "10:30:00"
     strike_type: "ITM3"
@@ -80,7 +80,7 @@ legs:
     trail_move_pct: 1.0
     auto_close_profit_pct: "12.0"
 
-    wait_trade_threshold_pct: 1.0
+    wait_trade_threshold_pct: 3.0
     wait_trade_timeout_seconds: 300
 
   # Leg 3: OTM2, 3 lots, exits at strategy end time
@@ -88,7 +88,7 @@ legs:
     enabled: true
     entry_time: "09:16:00"
     exit_time: "10:30:00"
-    strike_type: "ITM3"
+    strike_type: "ITM4"
     lot_multiplier: 1
 
     initial_sl_pct: 7.0
@@ -101,13 +101,13 @@ legs:
     trail_move_pct: null
     auto_close_profit_pct: null
 
-    wait_trade_threshold_pct: 3.0
+    wait_trade_threshold_pct: 2.5
     wait_trade_timeout_seconds: 300
 
 
 # Order Configuration
 orders:
-  auto_place_orders: false           # false = simulation, true = live trading
+  auto_place_orders: true           # false = simulation, true = live trading
   price_type: "MARKET"
   product: "NRML"
   entry_action: "BUY"
@@ -115,7 +115,7 @@ orders:
 
   # Stop Loss Order Management
   place_sl_order: true               # Place SL orders on broker orderbook
-  sl_order_type: "SL"
+  sl_order_type: "SL"                # SL = SL-Limit order (both Nifty Sehwag and Expiry Blast use SL-L)
   sl_limit_buffer_percent: 0.015     # 1.5% buffer between trigger and limit
   sl_use_percent_buffer: true
 

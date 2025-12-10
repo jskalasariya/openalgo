@@ -21,12 +21,12 @@ strategy:
   timezone: "Asia/Kolkata"
   
   # Only run on expiry day (True/False)
-  run_only_on_expiry_day: false
+  run_only_on_expiry_day: true
   
   # TEST MODE: Set to true to simulate all strategy logic WITHOUT placing actual orders
   # Perfect for backtesting over multiple expiries before going live
   # When true: All entries/exits tracked in DB, but NO orders sent to broker
-  test_mode: true
+  test_mode: false
   
   # RUN IMMEDIATELY ON STARTUP: Set to true to execute strategy immediately (bypass scheduler)
   # Useful for testing/debugging without waiting for scheduled time
@@ -55,7 +55,7 @@ monitoring:
   lookback_candles: 5
   
   # Breakout threshold (additional % above highest high, 0 means breakout at highest high)
-  breakout_threshold_pct: 0.05
+  breakout_threshold_pct: 0.15
 
 # Position Management
 position:
@@ -65,10 +65,10 @@ position:
   # Lot multiplier - quantity will be multiplied by this value
   # Final quantity = entry_quantity * lot_multiplier
   # Example: entry_quantity=75, lot_multiplier=2 → final quantity = 150
-  lot_multiplier: 10
+  lot_multiplier: 2
   
   # Initial stop loss as percentage of entry price (0.50 = 50%)
-  initial_stop_pct: 0.50
+  initial_stop_pct: 0.30
   
   # Trailing stop increment per move (0.01 = 1%)
   trail_step_pct: 0.01
@@ -97,7 +97,7 @@ position:
   
   # Profit step for trailing (0.05 = 5%)
   # For every profit_trailing_step_pct profit, profit target moves by profit_trailing_increment_pct
-  profit_trailing_step_pct: 0.05
+  profit_trailing_step_pct: 0.02
   
   # Profit target increment per step (0.01 = 1%)
   # Example: Every 5% profit move, target moves up by 1%
@@ -106,7 +106,7 @@ position:
 # Order Configuration
 orders:
   # Auto place orders (False = dry run mode, True = live trading)
-  auto_place_orders: false
+  auto_place_orders: true
   
   # Instrument type for API calls ("options" for options trading)
   instrument_type: "options"

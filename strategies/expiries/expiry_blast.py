@@ -851,7 +851,18 @@ class LegMonitor:
                 
                 # Entry logic: Check for breakout
                 if ltp > self.highest_high * (1 + BREAKOUT_THRESHOLD_PCT):
-                    self.state.entry_price = ltp
+                    # CRITICAL: Check if position was ever opened (prevent re-entry)
+                    if self.state.position_ever_opened:
+                        logger.warning(f"⚠️  {self.leg_type} breakout detected BUT position was already opened this session!")
+                        logger.warning(f"   Preventing re-entry. Setting exit_triggered=True.")
+                        self.state.exit_triggered = True
+                        continue
+
+                    logger.info(f"🚀 {self.leg_type} BREAKOUT DETECTED! LTP: ₹{ltp:.2f} > Breakout: ₹{self.highest_high * (1 + BREAKOUT_THRESHOLD_PCT):.2f}")
+
+                    # Store LTP as initial entry price (will be updated with actual fill)
+                    ltp_price = ltp
+                    self.state.entry_price = ltp_price
                     self.state.entry_time = datetime.now(TZ)
                     self.state.position_open = True
                     self.state.position_ever_opened = True  # Mark that position was opened in this session
@@ -859,20 +870,71 @@ class LegMonitor:
                     self.state.highest_price = ltp
                     self.state.last_trail_level = 0
                     
-                    # PERSISTENCE: Save entry
+                    logger.info(f"📍 {self.leg_type} Position State: position_open=True, position_ever_opened=True")
+
+                    # Place order first to get order_id
+                    order_id = None
+                    if AUTO_PLACE_ORDERS:
+                        # Get order_id from _place_order (need to modify it to return order_id)
+                        # For now, place order and try to fetch fill price
+                        logger.info(f"📤 Placing entry order: {self.leg_type} {self.symbol} x {FINAL_QUANTITY}")
+                        self._place_order(ENTRY_ACTION, FINAL_QUANTITY)
+
+                        # Fetch actual fill price from broker (for accurate P&L tracking)
+                        # Note: _place_order doesn't return order_id, so we get latest order
+                        try:
+                            resp = client.orderbook()
+                            if isinstance(resp, dict) and resp.get('status') == 'success':
+                                data = resp.get('data', {})
+                                orders = data.get('orders', []) if isinstance(data, dict) else data if isinstance(data, list) else []
+
+                                # Get latest order for this symbol
+                                for order in reversed(orders) if isinstance(orders, list) else []:
+                                    if isinstance(order, dict):
+                                        if order.get('symbol') == self.symbol and order.get('action') == ENTRY_ACTION:
+                                            order_id = order.get('orderid') or order.get('order_id')
+                                            break
+                        except Exception as e:
+                            logger.debug(f"Could not fetch latest order ID: {e}")
+
+                        # Fetch actual fill price if we have order_id
+                        if order_id:
+                            actual_fill_price = self._get_fill_price(order_id, max_wait_seconds=5)
+
+                            if actual_fill_price and actual_fill_price > 0:
+                                price_diff = actual_fill_price - ltp_price
+                                price_diff_pct = (price_diff / ltp_price) * 100
+
+                                self.state.entry_price = actual_fill_price
+
+                                if abs(price_diff) > 0.01:
+                                    if price_diff > 0:
+                                        logger.warning(f"⚠️ Slippage: Filled @ ₹{actual_fill_price:.2f} vs LTP ₹{ltp_price:.2f} (+₹{price_diff:.2f} / +{price_diff_pct:.2f}%)")
+                                    else:
+                                        logger.info(f"✅ Filled @ ₹{actual_fill_price:.2f} vs LTP ₹{ltp_price:.2f} (₹{price_diff:.2f} / {price_diff_pct:.2f}%)")
+                                else:
+                                    logger.info(f"✅ Filled @ ₹{actual_fill_price:.2f} (matches LTP)")
+                            else:
+                                logger.warning(f"⚠️ Could not fetch fill price from broker, using LTP: ₹{ltp_price:.2f}")
+
+                        # Recalculate stop price based on ACTUAL entry price
+                        self.state.stop_price = round_to_tick_size(self.state.entry_price * (1 - INITIAL_STOP_PCT))
+                        self.state.highest_price = self.state.entry_price
+
+                    # PERSISTENCE: Save entry with actual fill price
                     if persistence:
                         try:
                             self.state.position_id = persistence.save_position_entry(
                                 symbol=self.symbol,
                                 leg_type=self.leg_type,
                                 strike=self.strike,
-                                entry_price=ltp,
+                                entry_price=self.state.entry_price,  # Now uses actual fill price
                                 highest_high_breakout=self.highest_high
                             )
                         except Exception as e:
                             logger.error(f"✗ Error saving position entry to persistence: {e}")
                     
-                    # Calculate entry details
+                    # Calculate entry details with ACTUAL entry price
                     num_lots = LOT_MULTIPLIER
                     risk_per_unit = self.state.entry_price - self.state.stop_price
                     total_risk = risk_per_unit * FINAL_QUANTITY
@@ -893,8 +955,7 @@ class LegMonitor:
                     logger.info(entry_msg)
                     
                     if AUTO_PLACE_ORDERS:
-                        self._place_order(ENTRY_ACTION, FINAL_QUANTITY)
-                        
+
                         # Place stop-loss order on broker for protection
                         if PLACE_SL_ORDER:
                             self.state.sl_order_id = self._place_sl_order(self.state.stop_price)
@@ -908,6 +969,22 @@ class LegMonitor:
                 profit_pct = (ltp / self.state.entry_price) - 1
                 gain_points = ltp - self.state.entry_price
                 
+                # Update highest price for tracking
+                if ltp > self.state.highest_price:
+                    self.state.highest_price = ltp
+
+                # Calculate profit target
+                current_profit_target = PROFIT_TARGET_PCT
+                if PROFIT_TRAILING_ENABLED:
+                    profit_intervals = int(profit_pct / PROFIT_TRAILING_STEP_PCT)
+                    if profit_intervals > 0:
+                        current_profit_target = PROFIT_TARGET_PCT + (profit_intervals * PROFIT_TRAILING_INCREMENT_PCT)
+
+                target_price = self.state.entry_price * (1 + current_profit_target)
+
+                # Detailed monitoring logs every iteration (like nifty_sehwag)
+                logger.info(f"LTP: ₹{ltp:.2f} | Entry: ₹{self.state.entry_price:.2f} | P&L: {profit_pct*100:+.2f}% | SL: ₹{self.state.stop_price:.2f} | Target: ₹{target_price:.2f} | Peak: ₹{self.state.highest_price:.2f}")
+
                 # PERSISTENCE: Queue update
                 if persistence and self.state.position_id:
                     try:
@@ -1457,6 +1534,115 @@ class LegMonitor:
             logger.error(f"✗ Exception canceling SL order: {e}")
             return False
     
+    def _get_fill_price_from_tradebook(self, order_id: str) -> Optional[float]:
+        """
+        Fetch actual fill price from tradebook (for MARKET orders)
+
+        Returns:
+            Actual execution price or None
+        """
+        try:
+            resp = client.tradebook()
+
+            if not isinstance(resp, dict) or resp.get('status') != 'success':
+                return None
+
+            data = resp.get('data', {})
+
+            # Handle nested structure: data -> trades -> [list]
+            if isinstance(data, dict) and 'trades' in data:
+                trades = data.get('trades', [])
+            else:
+                trades = data if isinstance(data, list) else []
+
+            if not isinstance(trades, list):
+                return None
+
+            # Find trade matching this order_id
+            for trade in trades:
+                if isinstance(trade, dict):
+                    trade_order_id = trade.get('orderid') or trade.get('order_id')
+                    if trade_order_id == order_id:
+                        # Get average execution price
+                        fill_price = (
+                            trade.get('averageprice') or
+                            trade.get('average_price') or
+                            trade.get('avgprice') or
+                            trade.get('price') or
+                            trade.get('fillprice')
+                        )
+
+                        if fill_price:
+                            try:
+                                fill_price_float = float(fill_price)
+                                if fill_price_float > 0:
+                                    return fill_price_float
+                            except (ValueError, TypeError):
+                                pass
+
+            return None
+
+        except Exception as e:
+            logger.debug(f"Error fetching from tradebook: {e}")
+            return None
+
+    def _get_fill_price(self, order_id: str, max_wait_seconds: int = 5) -> Optional[float]:
+        """
+        Fetch actual fill price from broker orderbook after order execution
+
+        Returns:
+            Average fill price or None if not found
+        """
+        try:
+            start_time = time.time()
+            poll_interval = 0.5
+
+            while (time.time() - start_time) < max_wait_seconds:
+                resp = client.orderbook()
+
+                if not isinstance(resp, dict) or resp.get('status') != 'success':
+                    time.sleep(poll_interval)
+                    continue
+
+                data = resp.get('data', {})
+
+                # Handle nested structure: data -> orders -> [list]
+                if isinstance(data, dict) and 'orders' in data:
+                    orders = data.get('orders', [])
+                else:
+                    orders = data if isinstance(data, list) else []
+
+                if isinstance(orders, list):
+                    for order in orders:
+                        if isinstance(order, dict):
+                            if order.get('orderid') == order_id or order.get('order_id') == order_id:
+                                # Check if order is complete
+                                status = (order.get('order_status') or order.get('status') or '').lower()
+
+                                if status in ['complete', 'executed', 'filled']:
+                                    # Try orderbook price first (works for LIMIT/SL)
+                                    orderbook_price = order.get('price')
+
+                                    if orderbook_price and float(orderbook_price) > 0:
+                                        return float(orderbook_price)
+
+                                    # For MARKET orders (price=0.0), fetch from tradebook
+                                    tradebook_price = self._get_fill_price_from_tradebook(order_id)
+                                    if tradebook_price and tradebook_price > 0:
+                                        return tradebook_price
+
+                                elif status in ['rejected', 'cancelled', 'canceled', 'failed']:
+                                    logger.error(f"✗ Order {order_id} was {status}")
+                                    return None
+
+                time.sleep(poll_interval)
+
+            return None
+
+        except Exception as e:
+            logger.debug(f"Error fetching fill price: {e}")
+            return None
+
     def _place_order(self, action: str, quantity: int):
         """Place an order (or simulate in test mode)"""
         try:

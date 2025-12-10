@@ -70,6 +70,7 @@ class LegState:
         self.quantity: int = lot_size * lot_multiplier
         self.entry_order_id: Optional[str] = None
         self.sl_order_id: Optional[str] = None  # Track SL order on broker
+        self.profit_target_order_id: Optional[str] = None  # Track profit target order on broker
 
         # Risk management - leg-level takes precedence over strategy-level
         self.initial_sl_pct: float = config.get('initial_sl_pct', strategy_defaults.get('initial_sl_pct', 7.0))
@@ -627,7 +628,7 @@ class NiftySehwagStrategy:
 
         start_time = time.time()
         last_log_time = start_time
-        log_interval = 10  # Log every 10 seconds
+        log_interval = 1  # Log every 10 seconds
 
         while True:
             # Get current option price (WebSocket first, then REST API fallback)
@@ -696,18 +697,16 @@ class NiftySehwagStrategy:
 
             leg_logger.info(f"Entering position: {leg_state.symbol}")
 
-            # Get current quote for entry
+            # Get current quote for entry (LTP reference)
             quote = self.market_data.get_quote(leg_state.symbol, self.option_exchange)
             if not quote or 'ltp' not in quote:
                 leg_logger.error("Could not fetch LTP for entry")
                 return False
 
-            leg_state.entry_price = quote['ltp']
-            leg_logger.info(f"Entry price: ₹{leg_state.entry_price:.2f}")
-
-            # Calculate SL
-            leg_state.current_sl = leg_state.entry_price * (1 - leg_state.initial_sl_pct / 100)
-            leg_logger.info(f"Initial SL: â‚¹{leg_state.current_sl:.2f}")
+            # Store LTP as initial entry price (will be updated with actual fill price)
+            ltp_price = float(quote['ltp'])
+            leg_state.entry_price = ltp_price
+            leg_logger.info(f"Entry price (LTP): ₹{ltp_price:.2f}")
 
             # Place entry order
             order_id = self.order_manager.place_order(
@@ -718,9 +717,36 @@ class NiftySehwagStrategy:
 
             if order_id:
                 leg_state.entry_order_id = order_id
-                leg_state.is_active = True
-                leg_state.highest_price = leg_state.entry_price
                 leg_logger.info(f"✅ Entry order placed: {order_id}")
+
+                # Fetch ACTUAL fill price from broker (for accurate P&L tracking)
+                actual_fill_price = self.order_manager.get_fill_price(order_id, max_wait_seconds=5, custom_logger=leg_logger)
+
+                if actual_fill_price and actual_fill_price > 0:
+                    # Update entry price with actual broker fill price
+                    price_diff = actual_fill_price - ltp_price
+                    price_diff_pct = (price_diff / ltp_price) * 100
+
+                    leg_state.entry_price = actual_fill_price
+
+                    if abs(price_diff) > 0.01:  # Only log if difference is significant
+                        if price_diff > 0:
+                            leg_logger.warning(f"⚠️ Slippage: Filled @ ₹{actual_fill_price:.2f} vs LTP ₹{ltp_price:.2f} (+₹{price_diff:.2f} / +{price_diff_pct:.2f}%)")
+                        else:
+                            leg_logger.info(f"✅ Filled @ ₹{actual_fill_price:.2f} vs LTP ₹{ltp_price:.2f} (₹{price_diff:.2f} / {price_diff_pct:.2f}%)")
+                    else:
+                        leg_logger.info(f"✅ Filled @ ₹{actual_fill_price:.2f} (matches LTP)")
+                else:
+                    leg_logger.warning(f"⚠️ Could not fetch fill price from broker, using LTP: ₹{ltp_price:.2f}")
+                    leg_logger.warning(f"   P&L calculations may be slightly inaccurate due to slippage")
+
+                # Calculate SL based on ACTUAL entry price (ensure float)
+                leg_state.current_sl = float(leg_state.entry_price * (1 - leg_state.initial_sl_pct / 100))
+                leg_logger.info(f"Initial SL: â‚¹{leg_state.current_sl:.2f} (based on actual entry)")
+
+                # Mark position as active
+                leg_state.is_active = True
+                leg_state.highest_price = float(leg_state.entry_price)  # Ensure float
 
                 # Place SL order on broker (following Expiry Blast standard)
                 sl_order_id = self.order_manager.place_sl_order(
@@ -753,16 +779,8 @@ class NiftySehwagStrategy:
                 else:
                     leg_logger.warning(f"⚠️ SL order not placed on broker (test mode or config disabled)")
 
-                # Subscribe to WebSocket
-                if self.websocket_client:
-                    try:
-                        self.websocket_client.subscribe_ltp_sync(
-                            leg_state.symbol,
-                            self.option_exchange
-                        )
-                        leg_logger.info(f"✓ WebSocket subscribed for {leg_state.symbol}")
-                    except Exception as ws_error:
-                        leg_logger.warning(f"⚠️ Could not subscribe to WebSocket: {ws_error}")
+                # Note: WebSocket subscription already done during Wait & Trade phase
+                # No need to subscribe again here to avoid duplicate subscription logs
 
                 return True
             else:
@@ -829,8 +847,17 @@ class NiftySehwagStrategy:
 
         # Register WebSocket callback if available
         if self.websocket_client:
-            def on_price_update(ltp: float):
-                self._handle_price_update(leg_state, ltp, leg_logger)
+            def on_price_update(ltp):
+                try:
+                    # Ensure price is float (WebSocket may return string)
+                    if ltp is None:
+                        return
+                    ltp_float = float(ltp)
+                    self._handle_price_update(leg_state, ltp_float, leg_logger)
+                except (TypeError, ValueError) as e:
+                    leg_logger.error(f"Price conversion error: ltp={ltp} (type={type(ltp).__name__}), error={e}")
+                except Exception as e:
+                    leg_logger.error(f"Callback error: {e}", exc_info=True)
 
             self.websocket_client.on_price_update(leg_state.symbol, on_price_update)
 
@@ -845,6 +872,8 @@ class NiftySehwagStrategy:
                     current_price = quote.get('ltp') if quote else None
 
                 if current_price:
+                    # Ensure price is float (not string)
+                    current_price = float(current_price)
                     self._handle_price_update(leg_state, current_price, leg_logger)
 
                 # Check exit time
@@ -868,6 +897,26 @@ class NiftySehwagStrategy:
         if not leg_state.is_active or not current_price:
             return
 
+        # Check if exit is in progress (prevents race condition)
+        if hasattr(leg_state, '_exiting') and leg_state._exiting:
+            return
+
+        try:
+            # Ensure price is float (safety check)
+            current_price = float(current_price)
+
+            # Ensure leg_state values are also float
+            if not isinstance(leg_state.highest_price, (int, float)):
+                leg_logger.error(f"Type error: highest_price is {type(leg_state.highest_price).__name__}: {leg_state.highest_price}")
+                leg_state.highest_price = float(leg_state.highest_price)
+
+            if not isinstance(leg_state.current_sl, (int, float)):
+                leg_logger.error(f"Type error: current_sl is {type(leg_state.current_sl).__name__}: {leg_state.current_sl}")
+                leg_state.current_sl = float(leg_state.current_sl)
+        except (TypeError, ValueError) as e:
+            leg_logger.error(f"Price type conversion error in handle_price_update: current_price={current_price} (type={type(current_price).__name__}), error={e}")
+            return
+
         # Update highest price
         if current_price > leg_state.highest_price:
             leg_state.highest_price = current_price
@@ -884,9 +933,51 @@ class NiftySehwagStrategy:
         # Unified management logic - leg-level config takes precedence over strategy defaults
         self._manage_position_unified(leg_state, current_price, pnl_pct, leg_logger)
 
-        # Log periodic updates
-        if int(time.time()) % 30 == 0:  # Every 30 seconds
-            leg_logger.info(f"LTP: ₹{current_price:.2f}, P&L: {pnl_pct:+.2f}%, SL: ₹{leg_state.current_sl:.2f}")
+        # Log periodic updates - every second, but prevent duplicates
+        current_second = int(time.time())
+        if not hasattr(leg_state, 'last_log_second'):
+            leg_state.last_log_second = 0
+
+        if current_second > leg_state.last_log_second:
+            leg_state.last_log_second = current_second
+
+            # Build detailed monitoring log
+            log_parts = []
+            log_parts.append(f"LTP: ₹{current_price:.2f}")
+            log_parts.append(f"Entry: ₹{leg_state.entry_price:.2f}")
+            log_parts.append(f"P&L: {pnl_pct:+.2f}%")
+            log_parts.append(f"SL: ₹{leg_state.current_sl:.2f}")
+
+            # Add profit lock status if enabled
+            if leg_state.first_lock_achieved and leg_state.profit_exit_target is not None:
+                exit_target_price = leg_state.entry_price * (1 + leg_state.profit_exit_target / 100)
+                log_parts.append(f"Lock: ✓ (Exit@₹{exit_target_price:.2f}/{leg_state.profit_exit_target:+.1f}%)")
+
+                # Show next trail threshold
+                def get_param(key, default=None):
+                    return leg_state.config.get(key, leg_state.strategy_defaults.get(key, default))
+                trail_trigger = get_param('trail_trigger_pct')
+                if trail_trigger:
+                    next_trail_at = leg_state.last_trail_level + float(trail_trigger)
+                    log_parts.append(f"Next@{next_trail_at:.1f}%")
+            else:
+                # Show when lock will trigger
+                def get_param(key, default=None):
+                    return leg_state.config.get(key, leg_state.strategy_defaults.get(key, default))
+                first_lock = get_param('first_lock_pct')
+                lock_trigger = get_param('lock_trigger_pct', first_lock)
+                if lock_trigger is not None and lock_trigger not in ('null', 'none', ''):
+                    try:
+                        lock_trigger_float = float(lock_trigger)
+                        log_parts.append(f"Lock: ✗ (Trigger@{lock_trigger_float:.1f}%)")
+                    except (ValueError, TypeError):
+                        pass
+
+            # Add highest price reached
+            if leg_state.highest_price and leg_state.highest_price > leg_state.entry_price:
+                log_parts.append(f"Peak: ₹{leg_state.highest_price:.2f}")
+
+            leg_logger.info(" | ".join(log_parts))
 
     def _manage_position_unified(self, leg_state: LegState, current_price: float, pnl_pct: float, leg_logger):
         """
@@ -897,14 +988,31 @@ class NiftySehwagStrategy:
         2. Lock once then trail (first_lock_pct + trail_trigger_pct + trail_move_pct)
         3. Progressive escalating lock (lock_profit_pct + profit_lock_step + profit_step_threshold)
         """
+        # Helper to safely convert config values to float
+        def safe_float(value):
+            """Convert config value to float, handling 'null' strings from YAML"""
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                # Handle YAML 'null' string
+                if value.lower() in ('null', 'none', ''):
+                    return None
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    return None
+            return None
+
         # Get config with leg-level priority over strategy defaults
         def get_param(key, default=None):
             return leg_state.config.get(key, leg_state.strategy_defaults.get(key, default))
 
         # ===== 1. TRAILING STOP LOSS MANAGEMENT =====
         # Trail SL when profit moves X%, then move SL by Y%
-        sl_trail_trigger = get_param('sl_trail_trigger_pct')
-        sl_trail_move = get_param('sl_trail_move_pct')
+        sl_trail_trigger = safe_float(get_param('sl_trail_trigger_pct'))
+        sl_trail_move = safe_float(get_param('sl_trail_move_pct'))
 
         if sl_trail_trigger and sl_trail_move and pnl_pct > 0:
             # Check if profit has increased by trigger amount since last trail
@@ -958,26 +1066,26 @@ class NiftySehwagStrategy:
                         self.persistence.log_sl_update(leg_state.leg_num, old_sl, new_sl_price)
 
         # ===== 2. CHECK AUTO-CLOSE (HIGHEST PRIORITY) =====
-        auto_close_pct = get_param('auto_close_profit_pct')
+        auto_close_pct = safe_float(get_param('auto_close_profit_pct'))
         if auto_close_pct and pnl_pct >= auto_close_pct:
             leg_logger.info(f"✅ Auto-close at {auto_close_pct}% profit: {pnl_pct:.2f}%")
             self._exit_leg_position(leg_state, current_price, f"AUTO_CLOSE_{auto_close_pct}PCT", leg_logger)
             return
 
         # ===== 3. PROFIT MANAGEMENT - DETERMINE MODE =====
-        first_lock_pct = get_param('first_lock_pct')
-        trail_trigger_pct = get_param('trail_trigger_pct')
-        trail_move_pct = get_param('trail_move_pct')
-        lock_profit_pct = get_param('lock_profit_pct')
-        profit_lock_step = get_param('profit_lock_step')
-        profit_step_threshold = get_param('profit_step_threshold')
+        first_lock_pct = safe_float(get_param('first_lock_pct'))
+        trail_trigger_pct = safe_float(get_param('trail_trigger_pct'))
+        trail_move_pct = safe_float(get_param('trail_move_pct'))
+        lock_profit_pct = safe_float(get_param('lock_profit_pct'))
+        profit_lock_step = safe_float(get_param('profit_lock_step'))
+        profit_step_threshold = safe_float(get_param('profit_step_threshold'))
 
         # MODE 2: Lock Once Then Trail (RECOMMENDED)
         # New behavior: Trigger lock at X% profit, set exit at Y%, then trail
         if first_lock_pct and trail_trigger_pct and trail_move_pct:
             # Get lock trigger (profit % at which to activate lock)
             # If not specified, defaults to first_lock_pct (backward compatible)
-            lock_trigger_pct = get_param('lock_trigger_pct', first_lock_pct)
+            lock_trigger_pct = safe_float(get_param('lock_trigger_pct', first_lock_pct))
 
             # Initialize profit exit target on first call
             if leg_state.profit_exit_target is None:
@@ -995,6 +1103,29 @@ class NiftySehwagStrategy:
                 leg_logger.info(f"🔒 Profit lock triggered at {pnl_pct:.2f}% (trigger: {lock_trigger_pct}%)")
                 leg_logger.info(f"   Exit target set to {first_lock_pct}% - Will exit if profit falls to this level")
                 leg_logger.info(f"   Will trail exit by {trail_move_pct}% every {trail_trigger_pct}% profit increase")
+
+                # MODIFY existing SL order to lock profit (don't place new LIMIT order)
+                # This ensures only ONE order on broker that trails up with profit
+                profit_lock_price = leg_state.entry_price * (1 + first_lock_pct / 100)
+
+                if leg_state.sl_order_id:
+                    old_sl = leg_state.current_sl
+                    leg_state.current_sl = profit_lock_price  # Update local SL to lock level
+
+                    success = self.order_manager.modify_sl_order(
+                        order_id=leg_state.sl_order_id,
+                        symbol=leg_state.symbol,
+                        quantity=leg_state.quantity,
+                        new_stop_price=profit_lock_price,
+                        strategy_name=f"nifty_sehwag_{leg_state.name.replace(' ', '_')}"
+                    )
+                    if success:
+                        leg_logger.info(f"✅ SL order modified to lock profit: ₹{old_sl:.2f} → ₹{profit_lock_price:.2f}")
+                        leg_logger.info(f"   SL now protects {first_lock_pct}% profit (was {((old_sl - leg_state.entry_price) / leg_state.entry_price * 100):.1f}%)")
+                    else:
+                        leg_logger.warning(f"⚠️ Failed to modify SL to lock profit - SL remains at ₹{old_sl:.2f}")
+                else:
+                    leg_logger.warning(f"⚠️ No SL order ID found to modify for profit lock")
 
                 # Log to database
                 if self.persistence:
@@ -1020,7 +1151,8 @@ class NiftySehwagStrategy:
                     self._exit_leg_position(leg_state, current_price, f"TRAIL_EXIT_{leg_state.profit_exit_target:.1f}PCT", leg_logger)
                     return
 
-            # Stage 3: Trail the exit target as profit increases (after lock triggered)
+            # Stage 3: Trail the exit target UP as profit increases (PROGRESSIVE LOCK)
+            # User wants: 6% profit → lock 2%, 8% profit → lock 4%, 10% profit → lock 6%
             if leg_state.first_lock_achieved and leg_state.profit_exit_target is not None:
                 profit_increase = pnl_pct - leg_state.last_trail_level
 
@@ -1028,13 +1160,45 @@ class NiftySehwagStrategy:
                     # Calculate how many intervals we've crossed
                     intervals_crossed = int(profit_increase / trail_trigger_pct)
 
-                    # Move exit target down by trail_move_pct * intervals
+                    # Move exit target UP by trail_move_pct * intervals (CHANGED FROM DOWN)
                     old_target = leg_state.profit_exit_target
-                    leg_state.profit_exit_target -= (trail_move_pct * intervals_crossed)
+                    new_target = leg_state.profit_exit_target + (trail_move_pct * intervals_crossed)
+
+                    # Cap at current profit minus a small buffer to avoid immediate exit
+                    max_exit_target = pnl_pct - 0.5  # Stay 0.5% below current profit
+                    if new_target > max_exit_target:
+                        new_target = max_exit_target
+                        leg_logger.info(f"📈 Trail profit lock: {old_target:.2f}% → {new_target:.2f}% "
+                                      f"(Profit at {pnl_pct:.2f}%) - CAPPED at profit buffer")
+                    else:
+                        leg_logger.info(f"📈 Trail profit lock: {old_target:.2f}% → {new_target:.2f}% "
+                                      f"(Profit at {pnl_pct:.2f}%)")
+
+                    leg_state.profit_exit_target = new_target
                     leg_state.last_trail_level = pnl_pct
 
-                    leg_logger.info(f"📉 Trail exit target: {old_target:.2f}% → {leg_state.profit_exit_target:.2f}% "
-                                  f"(Profit at {pnl_pct:.2f}%)")
+                    # MODIFY SL order to trail the profit lock UP (not a separate LIMIT order)
+                    # This keeps only ONE order on broker that protects progressively more profit
+                    if leg_state.sl_order_id:
+                        old_sl = leg_state.current_sl
+                        new_sl_price = leg_state.entry_price * (1 + new_target / 100)
+                        leg_state.current_sl = new_sl_price  # Update local SL
+
+                        success = self.order_manager.modify_sl_order(
+                            order_id=leg_state.sl_order_id,
+                            symbol=leg_state.symbol,
+                            quantity=leg_state.quantity,
+                            new_stop_price=new_sl_price,
+                            strategy_name=f"nifty_sehwag_{leg_state.name.replace(' ', '_')}"
+                        )
+                        if success:
+                            leg_logger.info(f"✅ SL trailed to lock more profit: ₹{old_sl:.2f} → ₹{new_sl_price:.2f} (protects {new_target:.1f}% profit)")
+                        else:
+                            # SL order not modifiable (may have executed) - position likely already closed
+                            leg_logger.warning(f"⚠️ Could not trail SL - order may have executed")
+                            # Don't clear sl_order_id here, exit handler will clean up
+                    else:
+                        leg_logger.warning(f"⚠️ No SL order to trail (should not happen in normal flow)")
 
                     # Log to database
                     if self.persistence:
@@ -1077,56 +1241,107 @@ class NiftySehwagStrategy:
 
     def _exit_leg_position(self, leg_state: LegState, exit_price: float,
                           reason: str, leg_logger):
-        """Exit position"""
+        """Exit position (atomic, prevents duplicate exits)"""
         try:
-            # Cancel SL order on broker first (following Expiry Blast standard)
-            if leg_state.sl_order_id:
-                success = self.order_manager.cancel_sl_order(
-                    order_id=leg_state.sl_order_id,
-                    strategy_name=f"nifty_sehwag_{leg_state.name.replace(' ', '_')}"
-                )
-                if success:
-                    leg_logger.info(f"✅ SL order canceled on broker: {leg_state.sl_order_id}")
+            # ATOMIC CHECK: Only one thread can proceed with exit
+            with self.state_lock:
+                # Check if already exiting or already exited
+                if getattr(leg_state, '_exiting', False) or not leg_state.is_active:
+                    leg_logger.debug(f"Position already closing/closed, skipping duplicate exit")
+                    return
 
-                    # Log to database
-                    if self.persistence:
-                        self.persistence.log_event(
-                            "SL_ORDER_CANCELED",
-                            f"Leg {leg_state.leg_num} SL order canceled on broker",
-                            metadata={
-                                'leg_num': leg_state.leg_num,
-                                'sl_order_id': leg_state.sl_order_id,
-                                'reason': reason
-                            }
-                        )
-                else:
-                    leg_logger.warning(f"⚠️ Failed to cancel SL order (may have already executed)")
-                leg_state.sl_order_id = None
-
-            # Place exit order
-            order_id = self.order_manager.place_order(
-                symbol=leg_state.symbol,
-                quantity=leg_state.quantity,
-                action=self.order_manager.exit_action
-            )
-
-            if order_id:
+                # Mark as exiting immediately (prevents other threads from entering)
+                leg_state._exiting = True
                 leg_state.is_active = False
-                leg_state.exit_price = exit_price
-                leg_state.exit_reason = reason
 
-                pnl, pnl_pct = leg_state.calculate_pnl(exit_price)
-                leg_logger.info(f"✅ Exited: P&L={pnl_pct:+.2f}%, Reason={reason}")
+            # Store local copies of order IDs for consistent logging
+            sl_order_id = leg_state.sl_order_id
+            profit_target_order_id = leg_state.profit_target_order_id
 
-                # Persist exit to DB
-                if self.persistence:
-                    self.persistence.record_leg_exit(
-                        leg_state.leg_num,
-                        exit_price,
-                        reason
+            # Calculate P&L FIRST (before any modifications)
+            pnl, pnl_pct = leg_state.calculate_pnl(exit_price)
+
+            # Cancel SL order on broker (best-effort)
+            # NOTE: This is the ONLY order we manage - SL gets modified to lock profits
+            if sl_order_id:
+                try:
+                    success = self.order_manager.cancel_sl_order(
+                        order_id=sl_order_id,
+                        strategy_name=f"nifty_sehwag_{leg_state.name.replace(' ', '_')}"
                     )
+                    if success:
+                        leg_logger.info(f"✅ SL order canceled on broker: {sl_order_id}")
+                    else:
+                        leg_logger.warning(f"⚠️ SL order cancellation returned False: {sl_order_id}")
+                except Exception as e:
+                    # Don't fail exit if cancel fails (order might have already executed)
+                    leg_logger.warning(f"⚠️ SL order cancellation failed: {e}")
+                finally:
+                    # Clear local reference regardless
+                    leg_state.sl_order_id = None
+
+            # Note: No separate profit target order to cancel - we modify SL for profit lock
+            # Clear profit_target_order_id if it was set (legacy/transition)
+            if profit_target_order_id:
+                leg_logger.debug(f"Clearing legacy profit_target_order_id: {profit_target_order_id}")
+                leg_state.profit_target_order_id = None
+
+            # Place exit order (this is the actual SELL to close position)
+            try:
+                order_id = self.order_manager.place_order(
+                    symbol=leg_state.symbol,
+                    quantity=leg_state.quantity,
+                    action=self.order_manager.exit_action
+                )
+                if not order_id:
+                    leg_logger.error("Exit order placement returned no order ID")
+            except Exception as e:
+                leg_logger.error(f"Exit order placement error: {e}")
+
+            # Record exit details
+            leg_state.exit_price = exit_price
+            leg_state.exit_reason = reason
+
+            # Print comprehensive exit summary ONCE
+            leg_logger.info("=" * 80)
+            leg_logger.info(f"✅ POSITION CLOSED - {reason}")
+            leg_logger.info("=" * 80)
+            leg_logger.info(f"Symbol:          {leg_state.symbol}")
+            leg_logger.info(f"Quantity:        {leg_state.quantity}")
+            leg_logger.info(f"Entry Price:     ₹{leg_state.entry_price:.2f}")
+            leg_logger.info(f"Exit Price:      ₹{exit_price:.2f}")
+            leg_logger.info(f"Price Change:    ₹{exit_price - leg_state.entry_price:+.2f} ({pnl_pct:+.2f}%)")
+            leg_logger.info(f"Initial SL:      ₹{leg_state.entry_price * (1 - leg_state.initial_sl_pct / 100):.2f} (-{leg_state.initial_sl_pct}%)")
+            leg_logger.info(f"Final SL:        ₹{leg_state.current_sl:.2f}")
+            leg_logger.info(f"Highest Price:   ₹{leg_state.highest_price:.2f}")
+            leg_logger.info(f"Total P&L:       ₹{pnl:,.2f} ({pnl_pct:+.2f}%)")
+            leg_logger.info("=" * 80)
+
+            # Persist exit to DB
+            if self.persistence:
+                self.persistence.record_leg_exit(
+                    leg_state.leg_num,
+                    exit_price,
+                    reason
+                )
+
+                # Log to database
+                self.persistence.log_event(
+                    "POSITION_CLOSED",
+                    f"Leg {leg_state.leg_num} position closed: {reason}",
+                    metadata={
+                        'leg_num': leg_state.leg_num,
+                        'symbol': leg_state.symbol,
+                        'entry_price': leg_state.entry_price,
+                        'exit_price': exit_price,
+                        'pnl': pnl,
+                        'pnl_pct': pnl_pct,
+                        'reason': reason
+                    }
+                )
+
         except Exception as e:
-            leg_logger.error(f"Exit error: {e}")
+            leg_logger.error(f"Exit error: {e}", exc_info=True)
 
     def _print_summary(self):
         """Print strategy summary"""
