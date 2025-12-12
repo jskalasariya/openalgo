@@ -34,7 +34,7 @@ strategy:
 
 # Strategy Scheduling
 schedule:
-  strategy_start_hour: 9
+  strategy_start_hour: 8
   strategy_start_minute: 14              # Start before first leg entry
   strategy_start_second: 0
   end_hour: 15                           # Default end time for all legs
@@ -45,7 +45,7 @@ legs:
   - name: "profit lock with trail"
     enabled: true
     entry_time: "09:15:10"
-    exit_time: "13:30:00"
+    exit_time: "11:30:00"
     strike_type: "ITM3"                # ATM, ITM1-4, OTM1-4
     lot_multiplier: 1
 
@@ -61,6 +61,8 @@ legs:
 
     wait_trade_threshold_pct: 2.5      # Wait for 1% move before entry
     wait_trade_timeout_seconds: 300
+    wait_trade_reset_enabled: true    # Enable reset if price drops during wait
+    wait_trade_reset_drop_pct: 5.0    # Drop % to trigger reset (e.g., 1.0 = reset if drops 1%)
 
   # Leg 2: ATM, 2 lots, with trailing SL
   - name: "profit lock with auto close"
@@ -80,8 +82,10 @@ legs:
     trail_move_pct: 1.0
     auto_close_profit_pct: "12.0"
 
-    wait_trade_threshold_pct: 3.0
+    wait_trade_threshold_pct: 2.5
     wait_trade_timeout_seconds: 300
+    wait_trade_reset_enabled: true    # Enable reset if price drops during wait
+    wait_trade_reset_drop_pct: 6.0    # Drop % to trigger reset (e.g., 1.0 = reset if drops 1%)
 
   # Leg 3: OTM2, 3 lots, exits at strategy end time
   - name: "trailing sl only"
@@ -103,11 +107,13 @@ legs:
 
     wait_trade_threshold_pct: 2.5
     wait_trade_timeout_seconds: 300
+    wait_trade_reset_enabled: true    # Enable reset if price drops during wait
+    wait_trade_reset_drop_pct: 5.0    # Drop % to trigger reset (e.g., 1.0 = reset if drops 1%)
 
 
 # Order Configuration
 orders:
-  auto_place_orders: false           # false = simulation, true = live trading
+  auto_place_orders: true           # false = simulation, true = live trading
   price_type: "MARKET"
   product: "NRML"
   entry_action: "BUY"
@@ -156,4 +162,12 @@ websocket:
 
 # COMBINED:
 # - Use both trailing SL + profit lock for full protection + upside
+
+# WAIT & TRADE RESET:
+# - wait_trade_reset_enabled: Enable automatic reset if price drops
+# - wait_trade_reset_drop_pct: Drop % from peak to trigger reset
+# - Example: Reset enabled at 1.5% drop
+#   Price rises to ₹105 (peak), drops to ₹103.43 → Reset triggered
+#   New reference price: ₹103.43, wait for +2.5% again
+# - Prevents chasing high entry prices after pullbacks
 

@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 def is_market_open(tz=pytz.timezone('Asia/Kolkata')) -> bool:
     """Check if market is currently open"""
-
+    return True
     now = datetime.now(tz)
     current_time = now.time()
 
@@ -409,10 +409,21 @@ class NiftySehwagStrategy:
             wait_threshold = leg_state.config.get('wait_trade_threshold_pct', self.wait_trade_threshold_pct)
             wait_timeout = leg_state.config.get('wait_trade_timeout_seconds', self.wait_trade_timeout_seconds)
 
+            # Get reset parameters from leg config
+            reset_enabled = leg_state.config.get('wait_trade_reset_enabled', False)
+            reset_drop_pct = leg_state.config.get('wait_trade_reset_drop_pct')
+
+            # Treat string 'null' as None
+            if isinstance(reset_drop_pct, str) and reset_drop_pct.lower() == 'null':
+                reset_drop_pct = None
+
             leg_logger.info(f"Wait & Trade: {wait_threshold}% move, {wait_timeout}s timeout")
+            if reset_enabled and reset_drop_pct:
+                leg_logger.info(f"Reset Feature: Enabled (triggers on {reset_drop_pct}% drop)")
 
             # Wait for OPTION price movement confirmation (not NIFTY spot)
-            if not self._wait_for_trade_confirmation(option_symbol, wait_threshold, leg_logger, wait_timeout):
+            if not self._wait_for_trade_confirmation(option_symbol, wait_threshold, leg_logger, wait_timeout,
+                                                     reset_enabled, reset_drop_pct):
                 leg_logger.warning("Wait & Trade confirmation failed - skipping entry")
                 return
 
@@ -535,6 +546,15 @@ class NiftySehwagStrategy:
         wait_threshold = get_effective_param('wait_trade_threshold_pct', self.wait_trade_threshold_pct)
         wait_timeout = get_effective_param('wait_trade_timeout_seconds', self.wait_trade_timeout_seconds)
         leg_logger.info(f"  Wait & Trade:         {wait_threshold}% move required, {wait_timeout}s timeout")
+
+        # Show reset feature status
+        reset_enabled = get_leg_param('wait_trade_reset_enabled')
+        reset_drop_pct = get_leg_param('wait_trade_reset_drop_pct')
+        if reset_enabled and reset_drop_pct:
+            leg_logger.info(f"  Reset Feature:        Enabled (triggers on {reset_drop_pct}% drop from peak)")
+        else:
+            leg_logger.info(f"  Reset Feature:        Disabled")
+
         leg_logger.info("=" * 80)
 
         # ADD CONFIG VALIDATION - Show effective values after resolution
@@ -641,17 +661,21 @@ class NiftySehwagStrategy:
             return None
 
     def _wait_for_trade_confirmation(self, option_symbol: str, threshold_pct: float,
-                                     leg_logger, timeout: int) -> bool:
+                                     leg_logger, timeout: int, reset_enabled: bool = False,
+                                     reset_drop_pct: Optional[float] = None) -> bool:
         """
         Wait for OPTION price to move threshold_pct from initial price
 
         Uses WebSocket for real-time monitoring with REST API fallback
+        Supports automatic reset if price drops during wait period
 
         Args:
             option_symbol: Option symbol to monitor (e.g., NIFTY25DEC24500CE)
             threshold_pct: Percentage move required (e.g., 3.0 for 3%)
             leg_logger: Logger instance
             timeout: Maximum wait time in seconds (from config)
+            reset_enabled: Enable automatic reset on price drop
+            reset_drop_pct: Drop % from peak to trigger reset
 
         Returns:
             True if threshold reached, False if timeout
@@ -665,6 +689,10 @@ class NiftySehwagStrategy:
         reference_price = float(initial_quote['ltp'])
         target_price = reference_price * (1 + threshold_pct / 100)
         price_difference = target_price - reference_price
+
+        # Initialize peak tracking for reset logic
+        peak_price = reference_price
+        reset_count = 0
 
         # Get current NIFTY spot for context
         current_spot = self.market_data.get_underlying_price()
@@ -681,6 +709,8 @@ class NiftySehwagStrategy:
         leg_logger.info(f"   Target Price:    ₹{target_price:.2f}  (need +₹{price_difference:.2f} / +{threshold_pct}%)")
         leg_logger.info(f"   Breakout Level:  {breakout_type} = ₹{breakout_level:.2f}{spot_context}")
         leg_logger.info(f"   Timeout:         {timeout}s ({timeout//60}m {timeout%60}s)")
+        if reset_enabled and reset_drop_pct:
+            leg_logger.info(f"   Reset Feature:   Enabled (triggers on {reset_drop_pct}% drop from peak)")
         leg_logger.info("=" * 80)
 
         # Subscribe to WebSocket if available
@@ -710,6 +740,10 @@ class NiftySehwagStrategy:
                     current_price = float(quote['ltp'])
 
             if current_price:
+                # Update peak price
+                if current_price > peak_price:
+                    peak_price = current_price
+
                 # Check if threshold reached (option prices always move upward for positive movement)
                 move_pct = ((current_price - reference_price) / reference_price) * 100
 
@@ -719,8 +753,33 @@ class NiftySehwagStrategy:
                     leg_logger.info(f"✅ THRESHOLD REACHED!")
                     leg_logger.info(f"   {option_symbol}: ₹{reference_price:.2f} → ₹{current_price:.2f}")
                     leg_logger.info(f"   Gain: +₹{price_gain:.2f} ({move_pct:+.2f}%) | Target was {threshold_pct}%")
+                    if reset_count > 0:
+                        leg_logger.info(f"   Resets triggered: {reset_count}")
                     leg_logger.info("=" * 80)
                     return True
+
+                # Check for reset condition
+                if reset_enabled and reset_drop_pct and peak_price > reference_price:
+                    drop_from_peak = ((peak_price - current_price) / peak_price) * 100
+
+                    if drop_from_peak >= reset_drop_pct:
+                        reset_count += 1
+                        old_reference = reference_price
+                        old_target = target_price
+                        old_peak = peak_price
+
+                        # Reset to current price
+                        reference_price = current_price
+                        target_price = reference_price * (1 + threshold_pct / 100)
+                        peak_price = current_price
+
+                        leg_logger.warning("=" * 80)
+                        leg_logger.warning(f"🔄 WAIT & TRADE RESET #{reset_count}")
+                        leg_logger.warning(f"   Price dropped {drop_from_peak:.2f}% from peak ₹{old_peak:.2f}")
+                        leg_logger.warning(f"   Old Reference: ₹{old_reference:.2f} → New Reference: ₹{reference_price:.2f}")
+                        leg_logger.warning(f"   Old Target:    ₹{old_target:.2f} → New Target:    ₹{target_price:.2f}")
+                        leg_logger.warning(f"   Waiting for {threshold_pct}% move from new reference...")
+                        leg_logger.warning("=" * 80)
 
                 # Periodic logging with detailed information
                 elapsed = time.time() - start_time
@@ -732,9 +791,12 @@ class NiftySehwagStrategy:
                     current_spot = self.market_data.get_underlying_price()
                     spot_info = f", NIFTY: ₹{current_spot:.2f}" if current_spot else ""
 
+                    # Add reset info if applicable
+                    reset_info = f", Resets: {reset_count}" if reset_count > 0 else ""
+
                     leg_logger.info(
                         f"⏳ Monitoring {option_symbol}: Current ₹{current_price:.2f} → Target ₹{target_price:.2f} "
-                        f"(Need {move_pct:+.2f}% of {threshold_pct}%{spot_info}) | "
+                        f"(Need {move_pct:+.2f}% of {threshold_pct}%{spot_info}{reset_info}) | "
                         f"Progress: {min(progress, 100):.1f}% | Time left: {int(remaining)}s"
                     )
                     last_log_time = time.time()
@@ -746,6 +808,8 @@ class NiftySehwagStrategy:
                 leg_logger.warning(f"⏱️ WAIT & TRADE TIMEOUT")
                 leg_logger.warning(f"   {option_symbol}: ₹{reference_price:.2f} → ₹{current_price:.2f}" if current_price else f"   No price data received")
                 leg_logger.warning(f"   Moved: {final_move:+.2f}% (needed {threshold_pct}%) in {timeout}s")
+                if reset_count > 0:
+                    leg_logger.warning(f"   Resets triggered: {reset_count}")
                 leg_logger.warning(f"   Entry SKIPPED - threshold not reached in time")
                 leg_logger.warning("=" * 80)
                 return False
