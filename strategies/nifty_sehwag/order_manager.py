@@ -46,10 +46,65 @@ class OrderManager:
         self.sl_limit_buffer_percent = config.get('sl_limit_buffer_percent', 0.015)  # 1.5% default
         self.sl_use_percent_buffer = config.get('sl_use_percent_buffer', True)
 
+    def verify_position_exists(self, symbol: str) -> bool:
+        """
+        Verify if a position exists in broker's position book (called before exit orders only).
+
+        Args:
+            symbol: Symbol to check
+
+        Returns:
+            True if position exists, False otherwise
+        """
+        try:
+            # Skip check in test/sim modes
+            if self.test_mode or not self.auto_place_orders:
+                return True
+
+            # Call positionbook API
+            resp = self.client.positionbook()
+
+            # Handle error responses
+            if not isinstance(resp, dict):
+                logger.warning(f"Position verification failed: Invalid response type")
+                return True  # Allow order to proceed if API fails
+
+            if resp.get('status') != 'success':
+                logger.warning(f"Position verification failed: {resp.get('message', 'Unknown error')}")
+                return True  # Allow order to proceed if API fails
+
+            # Get positions data
+            positions_data = resp.get('data', [])
+            if not positions_data:
+                logger.warning(f"⚠️  No positions found in position book - position may already be closed")
+                return False
+
+            # Check if symbol exists in positions with non-zero quantity
+            for position in positions_data:
+                # Handle different broker response formats
+                pos_symbol = position.get('symbol') or position.get('tradingsymbol') or position.get('Symbol')
+                quantity = position.get('quantity') or position.get('netqty') or position.get('Quantity') or 0
+
+                try:
+                    quantity = int(quantity)
+                except (ValueError, TypeError):
+                    quantity = 0
+
+                if pos_symbol == symbol and quantity != 0:
+                    logger.debug(f"✓ Position verified: {symbol} (Qty: {quantity})")
+                    return True
+
+            logger.warning(f"⚠️  Position not found for {symbol} - may have been manually closed")
+            return False
+
+        except Exception as e:
+            logger.error(f"Error verifying position for {symbol}: {e}")
+            return True  # Allow order to proceed if check fails
+
     def place_order(self, symbol: str, quantity: int, action: str) -> Optional[str]:
         """
-        Place an order
-        
+        Place an order (with position verification for exit orders).
+
         Args:
             symbol: Symbol to trade
             quantity: Quantity to trade
@@ -59,6 +114,13 @@ class OrderManager:
             Order ID or None if failed
         """
         try:
+            # SAFETY CHECK: Verify position exists before placing exit orders
+            if action == self.exit_action:
+                if not self.verify_position_exists(symbol):
+                    logger.warning(f"🚫 EXIT ORDER SKIPPED: Position for {symbol} not found (manually closed?)")
+                    logger.warning(f"   This prevents duplicate exit orders")
+                    return None
+
             logger.info(f"📊 Placing {action} order: {symbol}, Qty: {quantity}")
             
             if self.test_mode:

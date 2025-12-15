@@ -107,7 +107,7 @@ class PositionManager:
         
         logger.info(f"🚪 Exiting Leg {leg.leg_id}: {reason} at {exit_price:.2f}")
         
-        # Place exit order
+        # Place exit order (with position verification)
         order_id = self.order_manager.place_order(
             leg.symbol, 
             leg.quantity, 
@@ -121,3 +121,12 @@ class PositionManager:
             leg.pnl, leg.pnl_pct = leg.calculate_pnl(exit_price, self.entry_action)
             
             logger.info(f"✅ Leg {leg.leg_id} exited - PnL: {leg.pnl_pct:.2f}% (₹{leg.pnl:.2f})")
+        else:
+            # Order failed or position already closed
+            logger.warning(f"⚠️  Exit order not placed for Leg {leg.leg_id}")
+            logger.warning(f"   Position likely closed manually - marking as inactive")
+            leg.is_active = False
+            leg.exit_price = exit_price
+            leg.exit_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            leg.pnl, leg.pnl_pct = leg.calculate_pnl(exit_price, self.entry_action)
+            logger.info(f"ℹ️  Leg {leg.leg_id} marked as closed - Estimated PnL: {leg.pnl_pct:.2f}% (₹{leg.pnl:.2f})")

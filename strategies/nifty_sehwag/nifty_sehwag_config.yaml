@@ -62,11 +62,11 @@ legs:
     wait_trade_threshold_pct: 2.5      # Wait for 1% move before entry
     wait_trade_timeout_seconds: 300
     wait_trade_reset_enabled: true    # Enable reset if price drops during wait
-    wait_trade_reset_drop_pct: 5.0    # Drop % to trigger reset (e.g., 1.0 = reset if drops 1%)
+    wait_trade_reset_drop_pct: 1.0    # Drop % to trigger reset (e.g., 1.0 = reset if drops 1%)
 
   # Leg 2: ATM, 2 lots, with trailing SL
   - name: "profit lock with auto close"
-    enabled: true
+    enabled: false
     entry_time: "09:15:10"
     exit_time: "11:30:00"
     strike_type: "ITM3"
@@ -89,7 +89,7 @@ legs:
 
   # Leg 3: OTM2, 3 lots, exits at strategy end time
   - name: "trailing sl only"
-    enabled: true
+    enabled: false
     entry_time: "09:16:00"
     exit_time: "11:30:00"
     strike_type: "ITM4"
