@@ -129,6 +129,10 @@ class NiftySehwagStrategy:
         self.wait_trade_threshold_pct = config.get('strategy', {}).get('wait_trade_threshold_pct', 3.0)
         self.wait_trade_timeout_seconds = config.get('strategy', {}).get('wait_trade_timeout_seconds', 300)
 
+        # Breakout Distance Delay parameters (with leg-level override support)
+        self.breakout_diff_threshold = config.get('strategy', {}).get('breakout_diff_threshold')
+        self.breakout_diff_delay_seconds = config.get('strategy', {}).get('breakout_diff_delay_seconds', 60)
+
         # Performance tuning - configurable sleep intervals
         self.wait_trade_check_interval = float(config.get('strategy', {}).get('wait_trade_check_interval', 0.5))
         self.monitor_check_interval = float(config.get('strategy', {}).get('monitor_check_interval', 0.1))
@@ -322,6 +326,66 @@ class NiftySehwagStrategy:
             )
             self.persistence.close_session(total_pnl, 0.0)
 
+    def _wait_for_distance_stabilization(
+        self,
+        breakout_direction: str,
+        breakout_distance: float,
+        leg_state: LegState,
+        leg_logger
+    ) -> tuple[str, float]:
+        """
+        Check if breakout distance exceeds threshold and delay entry if needed.
+
+        Simple behavior: If distance > threshold, delay entry by configured seconds.
+        No re-checking - just delays the entry time once and proceeds.
+
+        Args:
+            breakout_direction: Breakout direction ("CE" or "PE")
+            breakout_distance: Distance from breakout level
+            leg_state: Leg state object with config
+            leg_logger: Logger instance
+
+        Returns:
+            Tuple of (direction, distance) - always proceeds with entry after delay
+        """
+        diff_threshold = leg_state.config.get('breakout_diff_threshold', self.breakout_diff_threshold)
+        diff_delay = leg_state.config.get('breakout_diff_delay_seconds', self.breakout_diff_delay_seconds)
+
+        # If threshold not configured or distance already below threshold, proceed immediately
+        if diff_threshold is None or breakout_distance <= diff_threshold:
+            return (breakout_direction, breakout_distance)
+
+        # Distance exceeds threshold - delay entry
+        leg_logger.warning("=" * 80)
+        leg_logger.warning(f"⚠️  BREAKOUT DISTANCE THRESHOLD EXCEEDED")
+        leg_logger.warning(f"   Distance: {breakout_distance:.2f} points > Threshold: {diff_threshold:.2f} points")
+        leg_logger.warning(f"   Delaying entry by {diff_delay} seconds to allow market stabilization")
+        leg_logger.warning(f"   Original entry time will be shifted by {diff_delay}s")
+        leg_logger.warning("=" * 80)
+
+        # Simple delay - no re-checking
+        delay_start = time.time()
+        while (time.time() - delay_start) < diff_delay:
+            remaining = diff_delay - (time.time() - delay_start)
+
+            if remaining > 60:
+                # Log every 30 seconds for long delays
+                if int(remaining) % 30 == 0:
+                    leg_logger.info(f"⏳ Entry delayed: {int(remaining)}s remaining...")
+                time.sleep(30)
+            elif remaining > 0:
+                time.sleep(min(remaining, 5))
+            else:
+                break
+
+        leg_logger.info("=" * 80)
+        leg_logger.info(f"✅ DELAY COMPLETED ({diff_delay}s)")
+        leg_logger.info(f"   Proceeding with entry at new delayed time")
+        leg_logger.info("=" * 80)
+
+        # Return original values - no re-check, always proceed
+        return (breakout_direction, breakout_distance)
+
     def _run_leg_thread(self, leg_state: LegState):
         """
         Run a single leg in its own thread
@@ -329,9 +393,10 @@ class NiftySehwagStrategy:
         Flow:
         1. Wait for entry time
         2. Check breakout condition
-        3. Enter position if breakout
-        4. Monitor position via WebSocket
-        5. Exit on SL/target/time
+        3. Wait for distance stabilization (if needed)
+        4. Enter position if breakout valid
+        5. Monitor position via WebSocket
+        6. Exit on SL/target/time
         """
         leg_logger = get_leg_logger(leg_state.leg_num, leg_state.name)
 
@@ -389,13 +454,20 @@ class NiftySehwagStrategy:
 
             # Check breakout condition
             leg_logger.info("Checking breakout condition...")
-            breakout_direction = self._check_breakout_condition(leg_logger)
+            breakout_result = self._check_breakout_condition(leg_logger)
+            breakout_direction, breakout_distance = breakout_result
 
             if not breakout_direction:
                 leg_logger.warning("No breakout detected - skipping entry")
                 return
 
-            leg_logger.info(f"✓ Breakout detected: {breakout_direction}")
+            leg_logger.info(f"✓ Breakout detected: {breakout_direction} (Distance: {breakout_distance:.2f} points)")
+            leg_state.entry_direction = breakout_direction
+
+            # Check and delay entry if distance threshold exceeded
+            breakout_direction, breakout_distance = self._wait_for_distance_stabilization(
+                breakout_direction, breakout_distance, leg_state, leg_logger
+            )
             leg_state.entry_direction = breakout_direction
 
             # Calculate the option symbol for this leg based on breakout direction
@@ -555,6 +627,14 @@ class NiftySehwagStrategy:
         else:
             leg_logger.info(f"  Reset Feature:        Disabled")
 
+        # Show breakout distance delay status
+        diff_threshold = get_effective_param('breakout_diff_threshold', self.breakout_diff_threshold)
+        diff_delay = get_effective_param('breakout_diff_delay_seconds', self.breakout_diff_delay_seconds)
+        if diff_threshold is not None:
+            leg_logger.info(f"  Distance Delay:       Enabled ({diff_threshold} points → {diff_delay}s delay)")
+        else:
+            leg_logger.info(f"  Distance Delay:       Disabled")
+
         leg_logger.info("=" * 80)
 
         # ADD CONFIG VALIDATION - Show effective values after resolution
@@ -635,30 +715,35 @@ class NiftySehwagStrategy:
 
         leg_logger.info(f"✓ Time reached: {datetime.now(self.tz).strftime('%H:%M:%S')}")
 
-    def _check_breakout_condition(self, leg_logger) -> Optional[str]:
+    def _check_breakout_condition(self, leg_logger) -> tuple[Optional[str], float]:
         """
         Check if NIFTY spot has broken above highest_high or below lowest_low
 
         Returns:
-            "CE" if breakout above, "PE" if breakout below, None otherwise
+            Tuple of (direction, distance) where:
+            - direction: "CE" if breakout above, "PE" if breakout below, None otherwise
+            - distance: Points difference from breakout level
+            Returns (None, 0.0) if no breakout
         """
         current_spot = self.market_data.get_underlying_price()
 
         if not current_spot:
             leg_logger.error("Could not fetch spot price")
-            return None
+            return (None, 0.0)
 
         leg_logger.info(f"Spot: ₹{current_spot:.2f}, High: ₹{self.highest_high:.2f}, Low: ₹{self.lowest_low:.2f}")
 
         if current_spot > self.highest_high:
-            leg_logger.info(f"✓ Breakout ABOVE highest high ({current_spot:.2f} > {self.highest_high:.2f})")
-            return "CE"
+            distance = current_spot - self.highest_high
+            leg_logger.info(f"✓ Breakout ABOVE highest high ({current_spot:.2f} > {self.highest_high:.2f}), Distance: {distance:.2f} points")
+            return ("CE", distance)
         elif current_spot < self.lowest_low:
-            leg_logger.info(f"✓ Breakout BELOW lowest low ({current_spot:.2f} < {self.lowest_low:.2f})")
-            return "PE"
+            distance = self.lowest_low - current_spot
+            leg_logger.info(f"✓ Breakout BELOW lowest low ({current_spot:.2f} < {self.lowest_low:.2f}), Distance: {distance:.2f} points")
+            return ("PE", distance)
         else:
             leg_logger.info(f"No breakout (spot within range)")
-            return None
+            return (None, 0.0)
 
     def _wait_for_trade_confirmation(self, option_symbol: str, threshold_pct: float,
                                      leg_logger, timeout: int, reset_enabled: bool = False,
@@ -990,20 +1075,72 @@ class NiftySehwagStrategy:
 
             self.websocket_client.on_price_update(leg_state.symbol, on_price_update)
 
+        # Initialize staleness tracking
+        if not hasattr(leg_state, '_last_price'):
+            leg_state._last_price = None
+            leg_state._last_price_time = time.time()
+            leg_state._stale_price_count = 0
+            leg_state._last_staleness_check = time.time()
+
         # Monitor loop
         while leg_state.is_active:
             try:
                 # Get current price
-                if self.websocket_client:
+                current_price = None
+                use_fallback = False
+
+                # Check if WebSocket is available and connected
+                ws_available = self.websocket_client and hasattr(self.websocket_client, 'is_connected') and self.websocket_client.is_connected()
+
+                if ws_available:
                     current_price = self.websocket_client.get_last_price(leg_state.symbol)
+
+                    # Detect stale price (same price for too long) - time-based, not iteration-based
+                    current_time = time.time()
+                    if current_price and leg_state._last_price:
+                        if float(current_price) == leg_state._last_price:
+                            # Only increment counter once per second
+                            if current_time - leg_state._last_staleness_check >= 1.0:
+                                leg_state._stale_price_count += 1
+                                leg_state._last_staleness_check = current_time
+
+                                # Warn at 10 seconds
+                                if leg_state._stale_price_count == 10:
+                                    leg_logger.warning(f"⚠️ WebSocket price unchanged for 10s (₹{current_price:.2f}) - monitoring for staleness")
+                                # If price unchanged for 30+ seconds, use REST API fallback
+                                elif leg_state._stale_price_count >= 30:
+                                    leg_logger.warning(f"⚠️ WebSocket price stale ({leg_state._stale_price_count}s), switching to REST API")
+                                    use_fallback = True
+                        else:
+                            # Price changed - reset everything
+                            leg_state._stale_price_count = 0
+                            leg_state._last_price = float(current_price)
+                            leg_state._last_staleness_check = current_time
+                    elif current_price:
+                        leg_state._last_price = float(current_price)
+                        leg_state._stale_price_count = 0
+                        leg_state._last_staleness_check = current_time
                 else:
+                    if self.websocket_client:
+                        leg_logger.debug("WebSocket disconnected, using REST API")
+                    use_fallback = True
+
+                # Use REST API if no WebSocket, disconnected, or fallback needed
+                if not ws_available or use_fallback or not current_price:
                     quote = self.market_data.get_quote(leg_state.symbol, self.option_exchange)
-                    current_price = quote.get('ltp') if quote else None
+                    if quote:
+                        current_price = quote.get('ltp')
+                        # Reset staleness counter when REST API provides new price
+                        if current_price and float(current_price) != leg_state._last_price:
+                            leg_state._stale_price_count = 0
+                            leg_state._last_price = float(current_price)
 
                 if current_price:
                     # Ensure price is float (not string)
                     current_price = float(current_price)
                     self._handle_price_update(leg_state, current_price, leg_logger)
+                else:
+                    leg_logger.warning("⚠️ No price data available")
 
                 # Check exit time
                 if leg_state.exit_time and datetime.now(self.tz) >= leg_state.exit_time:
@@ -1083,9 +1220,9 @@ class NiftySehwagStrategy:
                             self.persistence.record_leg_exit(
                                 leg_state.leg_num,
                                 current_price,
-                                pnl,
-                                pnl_pct,
-                                "SL_EXECUTED_ON_BROKER"
+                                "SL_EXECUTED_ON_BROKER",
+                                realized_pnl=pnl,
+                                pnl_percentage=pnl_pct
                             )
 
                         leg_logger.info(f"✅ Position marked as closed (SL executed on broker)")
@@ -1530,7 +1667,9 @@ class NiftySehwagStrategy:
                 self.persistence.record_leg_exit(
                     leg_state.leg_num,
                     exit_price,
-                    reason
+                    reason,
+                    realized_pnl=pnl,
+                    pnl_percentage=pnl_pct
                 )
 
                 # Log to database

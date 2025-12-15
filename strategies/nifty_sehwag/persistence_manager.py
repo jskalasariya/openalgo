@@ -185,7 +185,8 @@ class NiftySehwagPersistence:
             atm_strike=strike  # Use same as strike for now
         )
 
-    def record_leg_exit(self, leg_num: int, exit_price: float, reason: str):
+    def record_leg_exit(self, leg_num: int, exit_price: float, reason: str,
+                       realized_pnl: float = None, pnl_percentage: float = None):
         """
         Convenience wrapper for recording leg exit
 
@@ -193,22 +194,32 @@ class NiftySehwagPersistence:
             leg_num: Leg number
             exit_price: Exit price
             reason: Exit reason
+            realized_pnl: Realized PnL (optional)
+            pnl_percentage: PnL percentage (optional)
         """
         position_id = self.leg_positions.get(leg_num)
         if position_id:
             update_position_status(
                 position_id=position_id,
                 status=reason,
-                exit_price=exit_price
+                exit_price=exit_price,
+                realized_pnl=realized_pnl,
+                pnl_percentage=pnl_percentage
             )
+            metadata_dict = {
+                'leg_num': leg_num,
+                'exit_price': exit_price,
+                'reason': reason
+            }
+            if realized_pnl is not None:
+                metadata_dict['realized_pnl'] = realized_pnl
+            if pnl_percentage is not None:
+                metadata_dict['pnl_percentage'] = pnl_percentage
+
             self.log_event(
                 "EXIT_EXECUTED",
                 f"Leg {leg_num} exited: {reason}",
-                metadata={
-                    'leg_num': leg_num,
-                    'exit_price': exit_price,
-                    'reason': reason
-                }
+                metadata=metadata_dict
             )
 
     def log_sl_update(self, leg_num: int, old_sl: float, new_sl: float):
