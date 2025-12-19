@@ -19,7 +19,7 @@ strategy:
   execution_mode: "parallel"             # "parallel" or "sequential"
 
   # Wait & Trade - default for all legs (can be overridden per leg)
-  wait_trade_threshold_pct: 1.0          # Price move % required before entry
+  wait_trade_threshold_pct: 2.0          # Price move % required before entry
   wait_trade_timeout_seconds: 300        # Max wait time (5 minutes)
 
   # Breakout analysis
@@ -27,11 +27,11 @@ strategy:
   lookback_candles_minutes: 3
 
   # Breakout Distance Delay - default for all legs (can be overridden per leg)
-  breakout_diff_threshold: 80            # Points difference threshold (null = disabled)
+  breakout_diff_threshold: 90            # Points difference threshold (null = disabled)
   breakout_diff_delay_seconds: 120       # Seconds to delay entry if threshold exceeded
 
   # Performance tuning (sleep intervals in seconds)
-  wait_trade_check_interval: 0.5         # How often to check price during Wait & Trade
+  wait_trade_check_interval: 0.1         # How often to check price during Wait & Trade
   monitor_check_interval: 0.1            # How often to check position (with WebSocket)
   monitor_check_interval_no_ws: 0.5      # How often to check position (without WebSocket)
   error_retry_interval: 1.0              # Wait time after error before retry
@@ -50,23 +50,23 @@ legs:
     enabled: true
     entry_time: "09:15:10"
     exit_time: "11:30:00"
-    strike_type: "ITM3"                # ATM, ITM1-4, OTM1-4
+    strike_type: "ITM2"                # ATM, ITM1-4, OTM1-4
     lot_multiplier: 1
 
     initial_sl_pct: 7.0                # Initial stop loss %
     sl_trail_trigger_pct: null         # Trailing SL: trigger % (null = disabled)
     sl_trail_move_pct: null            # Trailing SL: move %
 
-    lock_trigger_pct: 7.0             # Trigger lock at 6% profit
-    first_lock_pct: 1.0                # Lock 2% profit initially
+    lock_trigger_pct: 6.0             # Trigger lock at 6% profit
+    first_lock_pct: 2.0                # Lock 2% profit initially
     trail_trigger_pct: 2.0             # Every 2% profit increase → trail lock up
     trail_move_pct: 1.0                # Move lock up by 2% (6%→2%, 8%→4%, 10%→6%)
     auto_close_profit_pct: "null"        # Auto-close at X% profit (null = disabled)
 
-    wait_trade_threshold_pct: 2.5      # Wait for 1% move before entry
-    wait_trade_timeout_seconds: 300
+#    wait_trade_threshold_pct: 2      # Wait for 1% move before entry
+#    wait_trade_timeout_seconds: 300
     wait_trade_reset_enabled: true    # Enable reset if price drops during wait
-    wait_trade_reset_drop_pct: 2.5   # Drop % to trigger reset (e.g., 1.0 = reset if drops 1%)
+    wait_trade_reset_drop_pct: 3   # Drop % to trigger reset (e.g., 1.0 = reset if drops 1%)
 
   # Leg 2: ATM, 2 lots, with trailing SL
   - name: "profit lock with auto close"
@@ -80,23 +80,23 @@ legs:
     sl_trail_trigger_pct: null
     sl_trail_move_pct: null
 
-    lock_trigger_pct: 7.0
-    first_lock_pct: 1.0
+    lock_trigger_pct: 6.0
+    first_lock_pct: 2.0
     trail_trigger_pct: 2.0
     trail_move_pct: 1.0
-    auto_close_profit_pct: "10.0"
+    auto_close_profit_pct: "12.0"
 
-    wait_trade_threshold_pct: 2.5
-    wait_trade_timeout_seconds: 300
+#    wait_trade_threshold_pct: 2
+#    wait_trade_timeout_seconds: 300
     wait_trade_reset_enabled: true    # Enable reset if price drops during wait
-    wait_trade_reset_drop_pct: 2.5    # Drop % to trigger reset (e.g., 1.0 = reset if drops 1%)
+    wait_trade_reset_drop_pct: 3    # Drop % to trigger reset (e.g., 1.0 = reset if drops 1%)
 
   # Leg 3: OTM2, 3 lots, exits at strategy end time
   - name: "trailing sl only"
     enabled: true
-    entry_time: "09:16:00"
+    entry_time: "09:15:35"
     exit_time: "11:30:00"
-    strike_type: "ITM4"
+    strike_type: "ITM3"
     lot_multiplier: 1
 
     initial_sl_pct: 7.0
@@ -109,10 +109,10 @@ legs:
     trail_move_pct: null
     auto_close_profit_pct: null
 
-    wait_trade_threshold_pct: 2.5
-    wait_trade_timeout_seconds: 300
+#    wait_trade_threshold_pct: 2
+#    wait_trade_timeout_seconds: 300
     wait_trade_reset_enabled: true    # Enable reset if price drops during wait
-    wait_trade_reset_drop_pct: 2.5    # Drop % to trigger reset (e.g., 1.0 = reset if drops 1%)
+    wait_trade_reset_drop_pct: 3    # Drop % to trigger reset (e.g., 1.0 = reset if drops 1%)
 
     breakout_diff_threshold: null      # Disable distance delay for this leg
     breakout_diff_delay_seconds: 60
