@@ -47,10 +47,10 @@ def initialize_clients(config, logger):
     # Get API key from environment variable or config (priority: env var > config)
     api_key = os.getenv(
         "OPENALGO_APIKEY",
-        config.get('openalgo', {}).get('api_key')
+        config.get('api', {}).get('key')
     )
 
-    if not api_key or api_key == 'YOUR_API_KEY_HERE':
+    if not api_key or api_key == 'your_openalgo_api_key':
         raise ValueError(
             "Please configure valid API key:\n"
             "  1. Set environment variable: OPENALGO_APIKEY=your_key\n"
